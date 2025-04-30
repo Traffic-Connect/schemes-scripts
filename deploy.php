@@ -456,32 +456,61 @@ function update_redirects($hestiaDomain, $schemaUser, $redirectsData) {
 function needs_deployment($domain, $user) {
     $webRoot = "/home/$user/web/$domain/public_html";
 
-    // If directory doesn't exist, it needs deployment
+    // Если директория не существует, требуется развертывание
     if (!is_dir($webRoot)) {
-        log_message("Directory $webRoot doesn't exist, deployment needed");
+        log_message("No public_html directory: $domain");
         return true;
     }
 
-    // Check if index.html or index.php exists
-    if (!file_exists("$webRoot/index.html") && !file_exists("$webRoot/index.php")) {
-        log_message("No index file found in $webRoot, deployment needed");
+    // Проверка наличия index.html или index.php
+    $hasIndexFile = file_exists("$webRoot/index.html") || file_exists("$webRoot/index.php");
+    if (!$hasIndexFile) {
+        log_message("No index file found: $domain");
         return true;
     }
 
-    // Check if directory is empty or contains only our placeholder
-    $files = scandir($webRoot);
-    $contentCount = count($files) - 2; // Subtract . and ..
-
-    if ($contentCount <= 1) {
-        // Only one file, check if it's our placeholder
-        if (file_exists("$webRoot/index.html")) {
-            $content = file_get_contents("$webRoot/index.html");
-            if (strpos($content, "Site is being updated") !== false) {
-                log_message("Only placeholder found in $webRoot, deployment needed");
-                return true;
-            }
+    // Проверка на заглушку "Site is being updated"
+    if (file_exists("$webRoot/index.html")) {
+        $content = file_get_contents("$webRoot/index.html");
+        if (strpos($content, "Site is being updated") !== false) {
+            log_message("Placeholder page found: $domain");
+            return true;
         }
     }
+
+    // Проверка количества файлов в директории
+    $files = scandir($webRoot);
+    $contentCount = count($files) - 2; // Вычитаем . и ..
+
+    // Если только 1 файл (возможно, только index.html) и этот файл меньше 1KB,
+    // вероятно, это заглушка или пустой сайт
+    if ($contentCount <= 1 && file_exists("$webRoot/index.html")) {
+        $fileSize = filesize("$webRoot/index.html");
+        if ($fileSize < 1024) { // Меньше 1KB
+            log_message("Only one small file found: $domain");
+            return true;
+        }
+    }
+
+    // Проверка наличия критических файлов или директорий, которые должны присутствовать
+    // на нормальном сайте (например, css, js, images)
+    $expectedDirs = ['css', 'js', 'images', 'img', 'assets'];
+    $foundExpectedDirs = false;
+
+    foreach ($expectedDirs as $dir) {
+        if (is_dir("$webRoot/$dir")) {
+            $foundExpectedDirs = true;
+            break;
+        }
+    }
+
+    if (!$foundExpectedDirs && $contentCount < 5) {
+        // Если нет ожидаемых директорий и мало файлов, вероятно, сайт неполный
+        log_message("Possibly incomplete site (few files, no assets): $domain");
+        return true;
+    }
+
+    // Сайт выглядит нормально, развертывание не требуется
     return false;
 }
 
