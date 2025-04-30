@@ -1,0 +1,6 @@
+sub_filter '%domain%' '$scheme://$host';
+	sub_filter_once off;
+	sub_filter_types text/html;
+
+	include                         /etc/nginx/conf.d/*.conf;
+	include                         /etc/nginx/conf.d/domains/*.conf;
