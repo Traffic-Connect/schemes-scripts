@@ -157,7 +157,7 @@ function create_domain($domain, $user) {
 
     exec("/usr/local/hestia/bin/v-list-web-domain $user $domain 2>/dev/null", $output, $returnVar);
     if ($returnVar === 0) {
-        log_message("Domain exists: $domain");
+        log_message("Domain already exists for user $user: $domain");
         return $domain;
     }
 
@@ -167,14 +167,28 @@ function create_domain($domain, $user) {
         $existingUser = trim(implode("\n", $output));
 
         if (!empty($existingUser) && $existingUser !== $user) {
-            log_message("Domain owner change: $domain");
-            exec("/usr/local/hestia/bin/v-delete-web-domain $existingUser $domain", $output, $returnVar);
-            if ($returnVar !== 0) {
-                exec("/usr/local/hestia/bin/v-delete-dns-domain $existingUser $domain 2>/dev/null", $output, $returnVar);
-                exec("/usr/local/hestia/bin/v-delete-mail-domain $existingUser $domain 2>/dev/null", $output, $returnVar);
-                exec("/usr/local/hestia/bin/v-delete-web-domain $existingUser $domain 2>/dev/null", $output, $returnVar);
-            }
+            log_message("Domain exists with different owner. Transferring from $existingUser to $user: $domain");
+
+            exec("/usr/local/hestia/bin/v-delete-web-domain $existingUser $domain 2>/dev/null", $output, $returnVar);
             sleep(1);
+
+            exec("/usr/local/hestia/bin/v-delete-dns-domain $existingUser $domain 2>/dev/null", $output, $returnVar);
+            sleep(1);
+
+            exec("/usr/local/hestia/bin/v-delete-mail-domain $existingUser $domain 2>/dev/null", $output, $returnVar);
+            sleep(1);
+
+            exec("/usr/local/hestia/bin/v-search-domain-owner $domain 2>/dev/null", $output, $returnVar);
+            if ($returnVar === 0 && !empty($output)) {
+                $stillExists = trim(implode("\n", $output));
+                if (!empty($stillExists)) {
+                    log_message("Warning: Domain still exists after deletion attempt with user $stillExists: $domain");
+                    exec("/usr/local/hestia/bin/v-delete-web-domain $stillExists $domain --force 2>/dev/null", $output, $returnVar);
+                    sleep(2);
+                }
+            }
+
+            log_message("Domain removed from previous owner: $domain");
         }
     }
 
@@ -182,17 +196,43 @@ function create_domain($domain, $user) {
     exec("/usr/local/hestia/bin/v-add-web-domain $user $domain 2>&1", $output, $returnVar);
 
     if ($returnVar !== 0) {
-        log_message("Retry domain creation: $domain");
+        log_message("First attempt failed. Retrying domain creation: $domain");
         sleep(2);
         $output = [];
         exec("/usr/local/hestia/bin/v-add-web-domain $user $domain 2>&1", $output, $returnVar);
+
+        if ($returnVar !== 0) {
+            log_message("Second attempt failed. Checking for conflicts: $domain");
+
+            // Проверяем все возможные места где может быть домен
+            exec("/usr/local/hestia/bin/v-list-users", $users, $returnVar);
+            if ($returnVar === 0) {
+                foreach ($users as $checkUser) {
+                    if (empty($checkUser)) continue;
+                    exec("/usr/local/hestia/bin/v-list-web-domain $checkUser $domain 2>/dev/null", $checkOutput, $checkReturn);
+                    if ($checkReturn === 0) {
+                        log_message("Found domain $domain with user $checkUser - removing");
+                        exec("/usr/local/hestia/bin/v-delete-web-domain $checkUser $domain --force 2>/dev/null", $delOutput, $delReturn);
+                        sleep(1);
+                    }
+                }
+            }
+
+            sleep(2);
+            $output = [];
+            exec("/usr/local/hestia/bin/v-add-web-domain $user $domain 2>&1", $output, $returnVar);
+        }
     }
 
     if ($returnVar === 0) {
         exec("/usr/local/hestia/bin/v-change-web-domain-proxy-tpl $user $domain tc-schemas", $output, $returnVar);
-        log_message("Domain created: $domain");
+        if ($returnVar !== 0) {
+            log_message("Warning: Failed to apply proxy template for $domain");
+        }
+        log_message("Domain created successfully: $domain");
     } else {
-        log_message("Failed to create: $domain");
+        log_message("Failed to create domain after all attempts: $domain");
+        log_message("Error output: " . implode("\n", $output));
     }
 
     return $domain;
