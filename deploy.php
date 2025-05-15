@@ -225,7 +225,7 @@ function create_domain($domain, $user) {
     }
 
     if ($returnVar === 0) {
-        exec("/usr/local/hestia/bin/v-change-web-domain-proxy-tpl $user $domain tc-schemas", $output, $returnVar);
+        exec("/usr/local/hestia/bin/v-change-web-domain-proxy-tpl $user $domain tc-nginx-only", $output, $returnVar);
         if ($returnVar !== 0) {
             log_message("Warning: Failed to apply proxy template for $domain");
         }
