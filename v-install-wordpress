@@ -1,0 +1,226 @@
+#!/bin/bash
+
+# Аргументы: $1=user $2=domain $3=title $4=admin_user $5=admin_pass $6=admin_email
+USER=$1
+DOMAIN=$2
+TITLE=$3
+ADMIN_USER=$4
+ADMIN_PASS=$5
+ADMIN_EMAIL=$6
+
+# Проверка аргументов
+if [ -z "$USER" ] || [ -z "$DOMAIN" ] || [ -z "$TITLE" ] || [ -z "$ADMIN_USER" ] || [ -z "$ADMIN_PASS" ] || [ -z "$ADMIN_EMAIL" ]; then
+    echo "Error: Missing required arguments"
+    echo "Usage: $0 <user> <domain> <title> <admin_user> <admin_pass> <admin_email>"
+    exit 1
+fi
+
+# Пути и переменные БД
+WEB_PATH="/home/$USER/web/$DOMAIN/public_html"
+
+# Создаем безопасное имя для БД из домена (убираем точки и спецсимволы, ограничиваем длину)
+DB_SAFE_NAME=$(echo "$DOMAIN" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-32)
+DB_NAME="${DB_SAFE_NAME}_wp"
+DB_USER="${DB_SAFE_NAME}_user"
+
+# Генерируем отдельный пароль для БД
+DB_PASS=$(openssl rand -base64 16 | tr -d '/+=' | cut -c1-12)
+
+# Логирование
+LOG_FILE="/var/log/hestia/wp-install.log"
+
+# Функция для выполнения Hestia команд
+execute_hestia_cmd() {
+    local cmd="$1"
+    shift
+    /usr/local/hestia/bin/"$cmd" "$@" 2>&1
+    return $?
+}
+
+# Функция для выполнения MySQL команд
+execute_mysql() {
+    local query="$1"
+    if [ -f "/etc/mysql/debian.cnf" ]; then
+        mysql --defaults-file=/etc/mysql/debian.cnf -e "$query" 2>/dev/null
+    elif [ -n "$MYSQL_ROOT_PASSWORD" ]; then
+        mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "$query" 2>/dev/null
+    else
+        mysql -u root -e "$query" 2>/dev/null
+    fi
+    return $?
+}
+
+# Проверяем, существует ли домен у какого-либо пользователя
+EXISTING_USER=""
+USERS_LIST=$(execute_hestia_cmd v-list-users json | jq -r 'keys[]' 2>/dev/null)
+
+for existing_user in $USERS_LIST; do
+    if [ -n "$existing_user" ]; then
+        # Проверяем домен у пользователя
+        DOMAIN_CHECK=$(execute_hestia_cmd v-list-web-domain "$existing_user" "$DOMAIN" json 2>/dev/null)
+        if [ $? -eq 0 ] && [ -n "$DOMAIN_CHECK" ]; then
+            EXISTING_USER="$existing_user"
+            break
+        fi
+    fi
+done
+
+# Если домен найден у другого пользователя, удаляем его
+if [ -n "$EXISTING_USER" ]; then
+    # Удаляем web домен
+    execute_hestia_cmd v-delete-web-domain "$EXISTING_USER" "$DOMAIN" >/dev/null 2>&1
+
+    # Удаляем DNS зону если существует
+    execute_hestia_cmd v-delete-dns-domain "$EXISTING_USER" "$DOMAIN" >/dev/null 2>&1
+
+    # Удаляем mail домен если существует
+    execute_hestia_cmd v-delete-mail-domain "$EXISTING_USER" "$DOMAIN" >/dev/null 2>&1
+
+    sleep 2 # Ждем завершения удаления
+fi
+
+# Создаем домен БЕЗ DNS и email
+CREATE_RESULT=$(execute_hestia_cmd v-add-web-domain "$USER" "$DOMAIN")
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to create domain: $CREATE_RESULT"
+    exit 1
+fi
+
+# Проверяем создание директории
+WEB_PATH="/home/$USER/web/$DOMAIN/public_html"
+if [ ! -d "$WEB_PATH" ]; then
+    echo "Error: Directory not found: $WEB_PATH"
+    exit 1
+fi
+
+# Проверка, установлен ли WP CLI
+if ! command -v wp &> /dev/null; then
+    echo "Error: WP CLI not found"
+    exit 1
+fi
+
+# Переходим в директорию
+cd "$WEB_PATH" || { echo "Error: Cannot change to $WEB_PATH"; exit 1; }
+
+# Удаляем все файлы в директории (включая существующий WordPress если есть)
+rm -rf "$WEB_PATH"/*
+rm -rf "$WEB_PATH"/.*  2>/dev/null || true
+
+# Удаляем существующую БД если есть
+execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;" >/dev/null 2>&1
+execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';" >/dev/null 2>&1
+
+# Создание базы данных
+if ! execute_mysql "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"; then
+    echo "Error: Failed to create database"
+    exit 1
+fi
+
+# Создание пользователя БД
+if ! execute_mysql "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"; then
+    echo "Error: Failed to create database user"
+    exit 1
+fi
+
+# Выдача прав пользователю
+if ! execute_mysql "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';"; then
+    echo "Error: Failed to grant privileges"
+    exit 1
+fi
+
+if ! execute_mysql "FLUSH PRIVILEGES;"; then
+    echo "Error: Failed to flush privileges"
+    exit 1
+fi
+
+# Скачивание WordPress
+sudo -u "$USER" wp core download --allow-root >/dev/null 2>&1 || {
+    echo "Error: Failed to download WordPress"
+    # Очистка БД при ошибке
+    execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;"
+    execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';"
+    exit 1
+}
+
+# Создание конфига
+sudo -u "$USER" wp config create \
+    --dbname="$DB_NAME" \
+    --dbuser="$DB_USER" \
+    --dbpass="$DB_PASS" \
+    --dbhost="localhost" \
+    --dbprefix="wp_" \
+    --allow-root >/dev/null 2>&1 || {
+    echo "Error: Failed to create wp-config.php"
+    # Очистка при ошибке
+    rm -rf "$WEB_PATH"/*
+    execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;"
+    execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';"
+    exit 1
+}
+
+# Добавляем дополнительные настройки в wp-config.php
+sudo -u "$USER" wp config set WP_DEBUG false --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp config set WP_DEBUG_LOG false --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp config set WP_DEBUG_DISPLAY false --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp config set DISALLOW_FILE_EDIT true --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp config set AUTOMATIC_UPDATER_DISABLED true --allow-root >/dev/null 2>&1
+
+# Добавляем поддержку HTTPS через прокси
+sudo -u "$USER" sed -i '/\/\* That'"'"'s all, stop editing!/i\
+\
+// HTTPS за прокси (например, CloudFlare)\
+if (isset($_SERVER['\''HTTP_X_FORWARDED_PROTO'\'']) && $_SERVER['\''HTTP_X_FORWARDED_PROTO'\''] == '\''https'\'') {\
+    $_SERVER['\''HTTPS'\''] = '\''on'\'';\
+}' "$WEB_PATH/wp-config.php"
+
+# Установка WordPress
+sudo -u "$USER" wp core install \
+    --url="https://$DOMAIN" \
+    --title="$TITLE" \
+    --admin_user="$ADMIN_USER" \
+    --admin_password="$ADMIN_PASS" \
+    --admin_email="$ADMIN_EMAIL" \
+    --skip-email \
+    --allow-root >/dev/null 2>&1 || {
+    echo "Error: Failed to install WordPress"
+    # Очистка при ошибке
+    rm -rf "$WEB_PATH"/*
+    execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;"
+    execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';"
+    exit 1
+}
+
+# Установка базовых настроек
+sudo -u "$USER" wp option update timezone_string 'Europe/Kiev' --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp option update date_format 'd.m.Y' --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp option update time_format 'H:i' --allow-root >/dev/null 2>&1
+
+# Удаление демо-контента
+sudo -u "$USER" wp post delete 1 --force --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp post delete 2 --force --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp comment delete 1 --force --allow-root >/dev/null 2>&1
+
+# Установка прав доступа
+chown -R "$USER":"$USER" "$WEB_PATH"
+find "$WEB_PATH" -type d -exec chmod 755 {} \;
+find "$WEB_PATH" -type f -exec chmod 644 {} \;
+chmod 600 "$WEB_PATH/wp-config.php"
+
+# Финальная проверка установки
+if [ ! -f "wp-config.php" ]; then
+    echo "Error: wp-config.php not found after installation"
+    exit 1
+fi
+
+if [ ! -d "wp-admin" ]; then
+    echo "Error: wp-admin directory not found"
+    exit 1
+fi
+
+# Формируем результат
+if [ -n "$EXISTING_USER" ]; then
+    echo "RECREATED_FROM:$EXISTING_USER:OK"
+else
+    echo "OK"
+fi
+exit 0
