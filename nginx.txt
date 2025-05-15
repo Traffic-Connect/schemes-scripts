@@ -138,7 +138,7 @@ http {
 	# Wildcard include
         sub_filter '%domain%' '$host';
         sub_filter_once off;
-        sub_filter_types text/html;
+        sub_filter_types text/html text/css;
 	include                         /etc/nginx/conf.d/*.conf;
 	include                         /etc/nginx/conf.d/domains/*.conf;
 }
