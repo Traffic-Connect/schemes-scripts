@@ -204,7 +204,6 @@ function create_domain($domain, $user) {
         if ($returnVar !== 0) {
             log_message("Second attempt failed. Checking for conflicts: $domain");
 
-            // Проверяем все возможные места где может быть домен
             exec("/usr/local/hestia/bin/v-list-users", $users, $returnVar);
             if ($returnVar === 0) {
                 foreach ($users as $checkUser) {
