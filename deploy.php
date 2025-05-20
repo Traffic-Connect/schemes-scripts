@@ -155,16 +155,24 @@ function create_domain($domain, $user) {
         $domain = substr($domain, 4);
     }
 
-    // First check if domain exists anywhere
+    // First check if the domain already exists with the correct user
+    exec("/usr/local/hestia/bin/v-list-web-domain $user $domain 2>/dev/null", $output, $returnVar);
+    if ($returnVar === 0) {
+        log_message("Domain already exists for user $user: $domain");
+        return $domain;
+    }
+
+    // Check if domain exists anywhere in the system
+    log_message("Checking for domain ownership: $domain");
     exec("/usr/local/hestia/bin/v-search-domain-owner $domain 2>/dev/null", $output, $returnVar);
 
     if ($returnVar === 0 && !empty($output)) {
         $existingUser = trim(implode("\n", $output));
 
         if (!empty($existingUser) && $existingUser !== $user) {
-            log_message("Domain exists with different owner. Transferring from $existingUser to $user: $domain");
+            log_message("Domain exists with different owner. Removing from $existingUser: $domain");
 
-            // Completely remove domain from existing user with force flag
+            // Step 1: Try standard deletion first
             exec("/usr/local/hestia/bin/v-delete-web-domain $existingUser $domain --force 2>/dev/null", $output, $returnVar);
             sleep(1);
 
@@ -174,72 +182,150 @@ function create_domain($domain, $user) {
             exec("/usr/local/hestia/bin/v-delete-mail-domain $existingUser $domain --force 2>/dev/null", $output, $returnVar);
             sleep(1);
 
-            // Remove any database associated with the domain
-            exec("/usr/local/hestia/bin/v-list-databases $existingUser | grep $domain", $dbOutput, $dbReturnVar);
-            if ($dbReturnVar === 0 && !empty($dbOutput)) {
-                foreach ($dbOutput as $dbLine) {
-                    if (preg_match('/^\s*(\S+)\s+/i', $dbLine, $matches)) {
-                        $dbName = $matches[1];
-                        exec("/usr/local/hestia/bin/v-delete-database $existingUser $dbName 2>/dev/null");
+            // Step 2: Check if domain is still associated with any users
+            $allAssociatedUsers = [];
+            exec("/usr/local/hestia/bin/v-list-users", $users, $returnVar);
+            if ($returnVar === 0) {
+                foreach ($users as $checkUser) {
+                    if (empty($checkUser)) continue;
+
+                    // Check web domains
+                    exec("/usr/local/hestia/bin/v-list-web-domain $checkUser $domain 2>/dev/null", $checkOutput, $checkReturn);
+                    if ($checkReturn === 0) {
+                        $allAssociatedUsers[] = "$checkUser (web)";
+                    }
+
+                    // Check DNS domains
+                    exec("/usr/local/hestia/bin/v-list-dns-domain $checkUser $domain 2>/dev/null", $checkOutput, $checkReturn);
+                    if ($checkReturn === 0) {
+                        $allAssociatedUsers[] = "$checkUser (dns)";
+                    }
+
+                    // Check mail domains
+                    exec("/usr/local/hestia/bin/v-list-mail-domain $checkUser $domain 2>/dev/null", $checkOutput, $checkReturn);
+                    if ($checkReturn === 0) {
+                        $allAssociatedUsers[] = "$checkUser (mail)";
                     }
                 }
             }
 
-            // Double check that domain is fully removed
-            exec("/usr/local/hestia/bin/v-search-domain-owner $domain 2>/dev/null", $checkOutput, $checkReturnVar);
-            if ($checkReturnVar === 0 && !empty($checkOutput)) {
-                $stillExists = trim(implode("\n", $checkOutput));
-                if (!empty($stillExists)) {
-                    log_message("Warning: Domain still exists after deletion attempt with user $stillExists: $domain");
-                    // Try one more time with extreme force
-                    exec("/usr/local/hestia/bin/v-delete-web-domain $stillExists $domain --force 2>/dev/null", $output, $returnVar);
-                    sleep(2);
+            if (!empty($allAssociatedUsers)) {
+                log_message("Domain still exists under: " . implode(", ", $allAssociatedUsers));
 
-                    // If it still exists after this, we'll log but continue
-                    exec("/usr/local/hestia/bin/v-search-domain-owner $domain 2>/dev/null", $finalCheck, $finalReturnVar);
-                    if ($finalReturnVar === 0 && !empty($finalCheck)) {
-                        log_message("Error: Could not fully remove domain from previous owner: $domain");
+                // Step 3: Forceful removal from each detected user
+                foreach ($allAssociatedUsers as $userInfo) {
+                    preg_match('/^(.*?) \((.*?)\)$/', $userInfo, $matches);
+                    if (count($matches) >= 3) {
+                        $userToClean = $matches[1];
+                        $domainType = $matches[2];
+
+                        log_message("Forcefully removing $domainType domain from $userToClean: $domain");
+
+                        switch ($domainType) {
+                            case 'web':
+                                exec("/usr/local/hestia/bin/v-delete-web-domain $userToClean $domain --force 2>/dev/null");
+                                break;
+                            case 'dns':
+                                exec("/usr/local/hestia/bin/v-delete-dns-domain $userToClean $domain --force 2>/dev/null");
+                                break;
+                            case 'mail':
+                                exec("/usr/local/hestia/bin/v-delete-mail-domain $userToClean $domain --force 2>/dev/null");
+                                break;
+                        }
                     }
+                }
+                sleep(2);
+            }
+
+            // Step 4: Manual cleanup of configuration files if needed
+            log_message("Performing deep cleanup for domain: $domain");
+
+            // Check and clean Nginx configs
+            exec("find /home/*/conf/web/*/$domain -type f 2>/dev/null", $nginxConfigs);
+            if (!empty($nginxConfigs)) {
+                log_message("Found leftover Nginx configs for $domain, removing...");
+                foreach ($nginxConfigs as $config) {
+                    exec("rm -f '$config' 2>/dev/null");
                 }
             }
 
-            log_message("Domain removed from previous owner: $domain");
+            // Check and clean Apache configs
+            exec("find /home/*/conf/web/*/$domain -type f 2>/dev/null", $apacheConfigs);
+            if (!empty($apacheConfigs)) {
+                log_message("Found leftover Apache configs for $domain, removing...");
+                foreach ($apacheConfigs as $config) {
+                    exec("rm -f '$config' 2>/dev/null");
+                }
+            }
+
+            // Clean Hestia config directory
+            exec("find /usr/local/hestia/data/users/*/web.conf -type f -exec grep -l $domain {} \\;", $webConfigs);
+            if (!empty($webConfigs)) {
+                log_message("Found domain references in Hestia configs, cleaning...");
+
+                foreach ($webConfigs as $configFile) {
+                    $tempFile = "$configFile.tmp";
+                    exec("grep -v $domain $configFile > $tempFile && mv $tempFile $configFile");
+                }
+            }
+
+            // Clean DNS configurations
+            exec("find /usr/local/hestia/data/users/*/dns.conf -type f -exec grep -l $domain {} \\;", $dnsConfigs);
+            if (!empty($dnsConfigs)) {
+                log_message("Found domain references in DNS configs, cleaning...");
+
+                foreach ($dnsConfigs as $configFile) {
+                    $tempFile = "$configFile.tmp";
+                    exec("grep -v $domain $configFile > $tempFile && mv $tempFile $configFile");
+                }
+            }
+
+            // Remove any remaining web directories
+            exec("find /home/*/web/$domain -type d 2>/dev/null", $webDirs);
+            if (!empty($webDirs)) {
+                log_message("Found leftover web directories for $domain, removing...");
+                foreach ($webDirs as $dir) {
+                    exec("rm -rf '$dir' 2>/dev/null");
+                }
+            }
+
+            // Final check
+            exec("/usr/local/hestia/bin/v-search-domain-owner $domain 2>/dev/null", $finalCheck, $finalReturnVar);
+            if ($finalReturnVar === 0 && !empty($finalCheck)) {
+                log_message("Warning: Domain still exists somewhere after deep cleanup: $domain");
+            } else {
+                log_message("Domain fully removed from system: $domain");
+            }
         }
     }
 
-    // Now add domain to the new user
+    // Now try to add the domain to the new user
+    log_message("Adding domain to user $user: $domain");
     $output = [];
     exec("/usr/local/hestia/bin/v-add-web-domain $user $domain 2>&1", $output, $returnVar);
 
     if ($returnVar !== 0) {
         log_message("First attempt failed. Retrying domain creation: $domain");
+        sleep(3);
+
+        // If first attempt failed, try to restart Hestia services
+        log_message("Restarting Hestia services to clear caches...");
+        exec("/usr/local/hestia/bin/v-restart-service 'nginx' 'quiet'");
         sleep(2);
+
+        // Try again
         $output = [];
         exec("/usr/local/hestia/bin/v-add-web-domain $user $domain 2>&1", $output, $returnVar);
 
         if ($returnVar !== 0) {
-            log_message("Second attempt failed. Checking for conflicts: $domain");
+            // Last resort: Directly manipulate Hestia configuration files
+            log_message("Second attempt failed. Attempting low-level fix: $domain");
 
-            // Check all users for this domain and force delete if found
-            exec("/usr/local/hestia/bin/v-list-users", $users, $returnVar);
-            if ($returnVar === 0) {
-                foreach ($users as $checkUser) {
-                    if (empty($checkUser)) continue;
-                    exec("/usr/local/hestia/bin/v-list-web-domain $checkUser $domain 2>/dev/null", $checkOutput, $checkReturn);
-                    if ($checkReturn === 0) {
-                        log_message("Found domain $domain with user $checkUser - removing with force");
-                        exec("/usr/local/hestia/bin/v-delete-web-domain $checkUser $domain --force 2>/dev/null", $delOutput, $delReturn);
-                        sleep(1);
-
-                        // Also remove DNS and mail domains forcefully
-                        exec("/usr/local/hestia/bin/v-delete-dns-domain $checkUser $domain --force 2>/dev/null");
-                        exec("/usr/local/hestia/bin/v-delete-mail-domain $checkUser $domain --force 2>/dev/null");
-                    }
-                }
-            }
-
-            // Try once more after cleaning up
+            // Rebuild user configuration
+            exec("/usr/local/hestia/bin/v-rebuild-user $user 'yes'");
             sleep(2);
+
+            // Try one last time
             $output = [];
             exec("/usr/local/hestia/bin/v-add-web-domain $user $domain 2>&1", $output, $returnVar);
         }
@@ -254,6 +340,13 @@ function create_domain($domain, $user) {
     } else {
         log_message("Failed to create domain after all attempts: $domain");
         log_message("Error output: " . implode("\n", $output));
+
+        // As a very last resort, if we absolutely need this domain to work,
+        // we could try to manually add it by creating configuration files directly,
+        // but this is risky and could lead to inconsistencies in Hestia's database.
+
+        // Instead, log a special message that indicates a manual intervention might be needed
+        log_message("MANUAL ACTION REQUIRED: Please check Hestia configuration for domain $domain");
     }
 
     return $domain;
