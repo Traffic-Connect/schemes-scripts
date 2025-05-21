@@ -27,7 +27,7 @@ echo "Setting up Hestia v-install-wordpress command..."
 if [ -f "./v-install-wordpress" ]; then
     cp ./v-install-wordpress /usr/local/hestia/bin/v-install-wordpress
     chmod +x /usr/local/hestia/bin/v-install-wordpress
-    chown root:root /usr/local/hestia/bin/v-install-wordpress
+   v-install-wordpress
     echo "Added v-install-wordpress command to Hestia"
 else
     echo "Warning: v-install-wordpress script not found in current directory"

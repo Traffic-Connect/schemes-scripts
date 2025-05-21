@@ -148,6 +148,20 @@ function transliterate($text) {
     return $transliterated;
 }
 
+/**
+ * Создает домен для указанного пользователя или переносит его от другого пользователя
+ *
+ * @param string $domain Доменное имя
+ * @param string $user Пользователь, которому должен принадлежать домен
+ * @return string Имя домена
+ */
+/**
+ * Создает домен для указанного пользователя или переносит его от другого пользователя
+ *
+ * @param string $domain Доменное имя
+ * @param string $user Пользователь, которому должен принадлежать домен
+ * @return string Имя домена
+ */
 function create_domain($domain, $user) {
     $originalDomain = $domain;
     $isWwwDomain = (strpos($domain, 'www.') === 0);
@@ -155,14 +169,18 @@ function create_domain($domain, $user) {
         $domain = substr($domain, 4);
     }
 
-    // First check if the domain already exists with the correct user
+    // Шаг 1: Проверяем, существует ли домен уже у нужного пользователя
     exec("/usr/local/hestia/bin/v-list-web-domain $user $domain 2>/dev/null", $output, $returnVar);
     if ($returnVar === 0) {
         log_message("Domain already exists for user $user: $domain");
+
+        // Добавляем настройки запрета доступа к существующему домену
+        add_nginx_restrictions($domain, $user);
+
         return $domain;
     }
 
-    // Check if domain exists anywhere in the system
+    // Шаг 2: Проверяем, принадлежит ли домен другому пользователю
     log_message("Checking for domain ownership: $domain");
     exec("/usr/local/hestia/bin/v-search-domain-owner $domain 2>/dev/null", $output, $returnVar);
 
@@ -170,186 +188,505 @@ function create_domain($domain, $user) {
         $existingUser = trim(implode("\n", $output));
 
         if (!empty($existingUser) && $existingUser !== $user) {
-            log_message("Domain exists with different owner. Removing from $existingUser: $domain");
+            log_message("Domain exists with different owner: $existingUser");
 
-            // Step 1: Try standard deletion first
-            exec("/usr/local/hestia/bin/v-delete-web-domain $existingUser $domain --force 2>/dev/null", $output, $returnVar);
-            sleep(1);
+            // Шаг 3: Домен существует у другого пользователя - переносим
+            $domain = transfer_domain($domain, $existingUser, $user);
 
-            exec("/usr/local/hestia/bin/v-delete-dns-domain $existingUser $domain --force 2>/dev/null", $output, $returnVar);
-            sleep(1);
+            // Добавляем настройки запрета доступа к перенесенному домену
+            add_nginx_restrictions($domain, $user);
 
-            exec("/usr/local/hestia/bin/v-delete-mail-domain $existingUser $domain --force 2>/dev/null", $output, $returnVar);
-            sleep(1);
-
-            // Step 2: Check if domain is still associated with any users
-            $allAssociatedUsers = [];
-            exec("/usr/local/hestia/bin/v-list-users", $users, $returnVar);
-            if ($returnVar === 0) {
-                foreach ($users as $checkUser) {
-                    if (empty($checkUser)) continue;
-
-                    // Check web domains
-                    exec("/usr/local/hestia/bin/v-list-web-domain $checkUser $domain 2>/dev/null", $checkOutput, $checkReturn);
-                    if ($checkReturn === 0) {
-                        $allAssociatedUsers[] = "$checkUser (web)";
-                    }
-
-                    // Check DNS domains
-                    exec("/usr/local/hestia/bin/v-list-dns-domain $checkUser $domain 2>/dev/null", $checkOutput, $checkReturn);
-                    if ($checkReturn === 0) {
-                        $allAssociatedUsers[] = "$checkUser (dns)";
-                    }
-
-                    // Check mail domains
-                    exec("/usr/local/hestia/bin/v-list-mail-domain $checkUser $domain 2>/dev/null", $checkOutput, $checkReturn);
-                    if ($checkReturn === 0) {
-                        $allAssociatedUsers[] = "$checkUser (mail)";
-                    }
-                }
-            }
-
-            if (!empty($allAssociatedUsers)) {
-                log_message("Domain still exists under: " . implode(", ", $allAssociatedUsers));
-
-                // Step 3: Forceful removal from each detected user
-                foreach ($allAssociatedUsers as $userInfo) {
-                    preg_match('/^(.*?) \((.*?)\)$/', $userInfo, $matches);
-                    if (count($matches) >= 3) {
-                        $userToClean = $matches[1];
-                        $domainType = $matches[2];
-
-                        log_message("Forcefully removing $domainType domain from $userToClean: $domain");
-
-                        switch ($domainType) {
-                            case 'web':
-                                exec("/usr/local/hestia/bin/v-delete-web-domain $userToClean $domain --force 2>/dev/null");
-                                break;
-                            case 'dns':
-                                exec("/usr/local/hestia/bin/v-delete-dns-domain $userToClean $domain --force 2>/dev/null");
-                                break;
-                            case 'mail':
-                                exec("/usr/local/hestia/bin/v-delete-mail-domain $userToClean $domain --force 2>/dev/null");
-                                break;
-                        }
-                    }
-                }
-                sleep(2);
-            }
-
-            // Step 4: Manual cleanup of configuration files if needed
-            log_message("Performing deep cleanup for domain: $domain");
-
-            // Check and clean Nginx configs
-            exec("find /home/*/conf/web/*/$domain -type f 2>/dev/null", $nginxConfigs);
-            if (!empty($nginxConfigs)) {
-                log_message("Found leftover Nginx configs for $domain, removing...");
-                foreach ($nginxConfigs as $config) {
-                    exec("rm -f '$config' 2>/dev/null");
-                }
-            }
-
-            // Check and clean Apache configs
-            exec("find /home/*/conf/web/*/$domain -type f 2>/dev/null", $apacheConfigs);
-            if (!empty($apacheConfigs)) {
-                log_message("Found leftover Apache configs for $domain, removing...");
-                foreach ($apacheConfigs as $config) {
-                    exec("rm -f '$config' 2>/dev/null");
-                }
-            }
-
-            // Clean Hestia config directory
-            exec("find /usr/local/hestia/data/users/*/web.conf -type f -exec grep -l $domain {} \\;", $webConfigs);
-            if (!empty($webConfigs)) {
-                log_message("Found domain references in Hestia configs, cleaning...");
-
-                foreach ($webConfigs as $configFile) {
-                    $tempFile = "$configFile.tmp";
-                    exec("grep -v $domain $configFile > $tempFile && mv $tempFile $configFile");
-                }
-            }
-
-            // Clean DNS configurations
-            exec("find /usr/local/hestia/data/users/*/dns.conf -type f -exec grep -l $domain {} \\;", $dnsConfigs);
-            if (!empty($dnsConfigs)) {
-                log_message("Found domain references in DNS configs, cleaning...");
-
-                foreach ($dnsConfigs as $configFile) {
-                    $tempFile = "$configFile.tmp";
-                    exec("grep -v $domain $configFile > $tempFile && mv $tempFile $configFile");
-                }
-            }
-
-            // Remove any remaining web directories
-            exec("find /home/*/web/$domain -type d 2>/dev/null", $webDirs);
-            if (!empty($webDirs)) {
-                log_message("Found leftover web directories for $domain, removing...");
-                foreach ($webDirs as $dir) {
-                    exec("rm -rf '$dir' 2>/dev/null");
-                }
-            }
-
-            // Final check
-            exec("/usr/local/hestia/bin/v-search-domain-owner $domain 2>/dev/null", $finalCheck, $finalReturnVar);
-            if ($finalReturnVar === 0 && !empty($finalCheck)) {
-                log_message("Warning: Domain still exists somewhere after deep cleanup: $domain");
-            } else {
-                log_message("Domain fully removed from system: $domain");
-            }
+            return $domain;
         }
     }
 
-    // Now try to add the domain to the new user
+    // Шаг 4: Домен не существует - создаем для указанного пользователя
+    log_message("Domain does not exist - creating new: $domain");
+
+    // Шаг 4.1: Удаляем все возможные остатки домена в системе
+    cleanup_domain_traces($domain);
+
+    // Шаг 4.2: Создаем домен у пользователя
     log_message("Adding domain to user $user: $domain");
     $output = [];
     exec("/usr/local/hestia/bin/v-add-web-domain $user $domain 2>&1", $output, $returnVar);
 
-    if ($returnVar !== 0) {
-        log_message("First attempt failed. Retrying domain creation: $domain");
-        sleep(3);
-
-        // If first attempt failed, try to restart Hestia services
-        log_message("Restarting Hestia services to clear caches...");
-        exec("/usr/local/hestia/bin/v-restart-service 'nginx' 'quiet'");
-        sleep(2);
-
-        // Try again
-        $output = [];
-        exec("/usr/local/hestia/bin/v-add-web-domain $user $domain 2>&1", $output, $returnVar);
-
-        if ($returnVar !== 0) {
-            // Last resort: Directly manipulate Hestia configuration files
-            log_message("Second attempt failed. Attempting low-level fix: $domain");
-
-            // Rebuild user configuration
-            exec("/usr/local/hestia/bin/v-rebuild-user $user 'yes'");
-            sleep(2);
-
-            // Try one last time
-            $output = [];
-            exec("/usr/local/hestia/bin/v-add-web-domain $user $domain 2>&1", $output, $returnVar);
-        }
-    }
-
     if ($returnVar === 0) {
+        log_message("Domain created successfully: $domain");
+
+        // Устанавливаем шаблон прокси
         exec("/usr/local/hestia/bin/v-change-web-domain-proxy-tpl $user $domain tc-nginx-only", $output, $returnVar);
         if ($returnVar !== 0) {
             log_message("Warning: Failed to apply proxy template for $domain");
         }
-        log_message("Domain created successfully: $domain");
+
+        // Добавляем настройки запрета доступа к новому домену
+        add_nginx_restrictions($domain, $user);
+
+        return $domain;
+    }
+
+    // Шаг 5: Стандартный метод не сработал - используем альтернативные подходы
+    log_message("Standard domain creation failed: " . implode("\n", $output));
+
+    // Шаг 5.1: Альтернативный метод создания с указанием дополнительных параметров
+    log_message("Trying alternative domain creation method");
+    exec("/usr/local/hestia/bin/v-add-web-domain $user $domain 'default' 'no' '' '' '' '' '' '' 'tc-nginx-only' 2>&1", $outputAlt, $returnVarAlt);
+
+    if ($returnVarAlt === 0) {
+        log_message("Alternative domain creation successful");
+
+        // Добавляем настройки запрета доступа к домену, созданному альтернативным методом
+        add_nginx_restrictions($domain, $user);
+
+        return $domain;
+    }
+
+    // Шаг 5.2: Альтернативный метод не сработал - используем низкоуровневый подход
+    log_message("Alternative method failed: " . implode("\n", $outputAlt));
+    log_message("Using low-level approach");
+
+    $domain = create_domain_low_level($domain, $user);
+
+    // Добавляем настройки запрета доступа к домену, созданному низкоуровневым методом
+    add_nginx_restrictions($domain, $user);
+
+    return $domain;
+}
+
+/**
+ * Добавляет ограничения доступа в Nginx конфигурацию домена
+ *
+ * @param string $domain Доменное имя
+ * @param string $user Пользователь
+ * @return bool Успешность операции
+ */
+/**
+ * Добавляет ограничения доступа в Nginx конфигурацию домена
+ *
+ * @param string $domain Доменное имя
+ * @param string $user Пользователь
+ * @return bool Успешность операции
+ */
+/**
+ * Добавляет ограничения доступа и настройки подмены в Nginx конфигурацию домена
+ *
+ * @param string $domain Доменное имя
+ * @param string $user Пользователь
+ * @return bool Успешность операции
+ */
+function add_nginx_restrictions($domain, $user) {
+    log_message("Adding Nginx access restrictions and filters for $domain");
+
+    $nginxConfPath = "/home/$user/conf/web/$domain/nginx.conf";
+
+    // Создаем директорию конфигурации, если она не существует
+    $confDir = dirname($nginxConfPath);
+    if (!is_dir($confDir)) {
+        mkdir($confDir, 0755, true);
+        exec("chown $user:$user $confDir");
+    }
+
+    // Формируем содержимое для добавления в конфигурацию
+    $configContent = "";
+
+    // Добавляем директивы подмены
+    $configContent .= "# Замена переменных в шаблонах\n";
+    $configContent .= "sub_filter '%domain%' '\$host';\n";
+    $configContent .= "sub_filter_once off;\n";
+    $configContent .= "sub_filter_types text/html text/css;\n\n";
+
+    // Добавляем правила блокировки
+    $configContent .= "# Запрет прямого доступа к static/*.html\n";
+    $configContent .= "location ~ ^/static/.*\\.html$ {\n    deny all;\n}\n\n";
+    $configContent .= "# Запрет прямого доступа к redirects.json\n";
+    $configContent .= "location = /redirects.json {\n    deny all;\n}\n";
+
+    // Если файл конфигурации существует
+    if (file_exists($nginxConfPath)) {
+        $nginxConf = file_get_contents($nginxConfPath);
+
+        // Проверяем наличие существующих директив
+        $hasSubFilter = (strpos($nginxConf, "sub_filter '%domain%'") !== false);
+        $hasStaticRule = (strpos($nginxConf, "location ~ ^/static/.*") !== false);
+        $hasRedirectsRule = (strpos($nginxConf, "location = /redirects.json") !== false);
+
+        if ($hasSubFilter && $hasStaticRule && $hasRedirectsRule) {
+            log_message("All required Nginx settings already exist for $domain");
+            return true;
+        }
+
+        // Подготавливаем контент для добавления
+        $contentToAdd = "";
+
+        if (!$hasSubFilter) {
+            $contentToAdd .= "# Замена переменных в шаблонах\n";
+            $contentToAdd .= "sub_filter '%domain%' '\$host';\n";
+            $contentToAdd .= "sub_filter_once off;\n";
+            $contentToAdd .= "sub_filter_types text/html text/css;\n\n";
+        }
+
+        if (!$hasStaticRule) {
+            $contentToAdd .= "# Запрет прямого доступа к static/*.html\n";
+            $contentToAdd .= "location ~ ^/static/.*\\.html$ {\n    deny all;\n}\n\n";
+        }
+
+        if (!$hasRedirectsRule) {
+            $contentToAdd .= "# Запрет прямого доступа к redirects.json\n";
+            $contentToAdd .= "location = /redirects.json {\n    deny all;\n}\n";
+        }
+
+        if (!empty($contentToAdd)) {
+            // Добавляем настройки в файл
+            file_put_contents($nginxConfPath, $nginxConf . "\n" . $contentToAdd);
+            log_message("Added missing Nginx settings to $domain");
+        }
     } else {
-        log_message("Failed to create domain after all attempts: $domain");
-        log_message("Error output: " . implode("\n", $output));
+        // Создаем новый файл с требуемыми настройками
+        file_put_contents($nginxConfPath, $configContent);
+        log_message("Created new Nginx configuration file for $domain");
+    }
 
-        // As a very last resort, if we absolutely need this domain to work,
-        // we could try to manually add it by creating configuration files directly,
-        // but this is risky and could lead to inconsistencies in Hestia's database.
+    // Устанавливаем права на файл
+    exec("chown $user:$user $nginxConfPath");
+    exec("chmod 644 $nginxConfPath");
 
-        // Instead, log a special message that indicates a manual intervention might be needed
-        log_message("MANUAL ACTION REQUIRED: Please check Hestia configuration for domain $domain");
+    // Проверяем синтаксис Nginx перед перезагрузкой
+    exec("nginx -t 2>&1", $testOutput, $testReturnVar);
+    if ($testReturnVar !== 0) {
+        log_message("Error in Nginx configuration: " . implode("\n", $testOutput));
+
+        // В случае ошибки, создаем упрощенную конфигурацию без комментариев
+        $simpleConfig = "sub_filter '%domain%' '\$host';\n";
+        $simpleConfig .= "sub_filter_once off;\n";
+        $simpleConfig .= "sub_filter_types text/html text/css;\n\n";
+        $simpleConfig .= "location ~ ^/static/.*\\.html$ {\n    deny all;\n}\n\n";
+        $simpleConfig .= "location = /redirects.json {\n    deny all;\n}\n";
+
+        file_put_contents($nginxConfPath, $simpleConfig);
+        exec("chown $user:$user $nginxConfPath");
+        exec("chmod 644 $nginxConfPath");
+
+        log_message("Created simplified Nginx configuration for $domain after error");
+    }
+
+    // Перезагружаем Nginx
+    exec("/usr/local/hestia/bin/v-restart-service 'nginx' 'quiet'", $output, $returnVar);
+    if ($returnVar === 0) {
+        log_message("Nginx restarted successfully after updating configuration for $domain");
+        return true;
+    } else {
+        log_message("Warning: Failed to restart Nginx after updating configuration for $domain");
+        return false;
+    }
+}
+
+/**
+ * Переносит домен от одного пользователя к другому в Hestia
+ *
+ * @param string $domain Доменное имя
+ * @param string $currentUser Текущий владелец домена
+ * @param string $targetUser Целевой пользователь для переноса
+ * @return string Имя домена
+ */
+function transfer_domain($domain, $currentUser, $targetUser) {
+    log_message("Transferring domain $domain from $currentUser to $targetUser");
+
+    // Шаг 1: Сохраняем содержимое домена
+    $timestamp = time();
+    $tempDir = "/tmp/domain_transfer_$timestamp";
+    mkdir($tempDir, 0755, true);
+
+    $webRoot = "/home/$currentUser/web/$domain/public_html";
+    if (is_dir($webRoot)) {
+        exec("cp -a $webRoot $tempDir/public_html");
+        log_message("Content copied to temporary directory");
+    } else {
+        mkdir("$tempDir/public_html", 0755, true);
+        log_message("Created empty public_html directory");
+    }
+
+    // Шаг 2: Получаем текущие настройки домена
+    $proxyTemplate = 'tc-nginx-only'; // значение по умолчанию
+    $ssl = 'no'; // значение по умолчанию
+
+    exec("/usr/local/hestia/bin/v-list-web-domain $currentUser $domain json", $domainInfo, $returnVar);
+    if ($returnVar === 0) {
+        $domainInfoJson = implode("\n", $domainInfo);
+        $domainSettings = json_decode($domainInfoJson, true);
+
+        if (!empty($domainSettings[$domain])) {
+            $domainSettings = $domainSettings[$domain];
+            $proxyTemplate = $domainSettings['PROXY'] ?? 'tc-nginx-only';
+            $ssl = $domainSettings['SSL'] ?? 'no';
+            log_message("Retrieved domain settings: PROXY=$proxyTemplate, SSL=$ssl");
+        } else {
+            log_message("Failed to parse domain settings JSON, using defaults");
+        }
+    } else {
+        log_message("Failed to get domain settings, using defaults");
+    }
+
+    // Шаг 3: Сохраняем SSL-сертификаты, если они есть
+    $sslDir = "/home/$currentUser/conf/web/$domain/ssl";
+    $hasSsl = false;
+
+    if ($ssl === 'yes' && is_dir($sslDir)) {
+        exec("mkdir -p $tempDir/ssl");
+        exec("cp -a $sslDir/* $tempDir/ssl/ 2>/dev/null");
+        $hasSsl = true;
+        log_message("SSL certificates copied");
+    }
+
+    // Шаг 4: Удаляем домен у текущего пользователя
+    log_message("Suspending domain for current user");
+    exec("/usr/local/hestia/bin/v-suspend-web-domain $currentUser $domain 2>/dev/null");
+    sleep(2);
+
+    log_message("Deleting domain from current user");
+    $deleteCommands = [
+        "/usr/local/hestia/bin/v-delete-web-domain $currentUser $domain --force",
+        "/usr/local/hestia/bin/v-delete-dns-domain $currentUser $domain --force",
+        "/usr/local/hestia/bin/v-delete-mail-domain $currentUser $domain --force"
+    ];
+
+    foreach ($deleteCommands as $cmd) {
+        exec($cmd . " 2>&1", $cmdOutput, $cmdReturnVar);
+        if ($cmdReturnVar !== 0) {
+            log_message("Command warning: $cmd");
+            log_message("Output: " . implode("\n", $cmdOutput));
+        }
+        sleep(1);
+    }
+
+    // Шаг 5: Перестраиваем конфигурацию пользователя
+    exec("/usr/local/hestia/bin/v-rebuild-user $currentUser 'yes' 2>/dev/null");
+
+    // Шаг 6: Очищаем все следы домена в системе
+    cleanup_domain_traces($domain);
+
+    // Шаг 7: Создаем домен у целевого пользователя стандартным методом
+    log_message("Creating domain for target user");
+    exec("/usr/local/hestia/bin/v-add-web-domain $targetUser $domain 2>&1", $output, $returnVar);
+
+    if ($returnVar !== 0) {
+        log_message("Standard domain creation failed: " . implode("\n", $output));
+
+        // Шаг 7.1: Пробуем альтернативный метод с указанием шаблона
+        log_message("Trying alternative domain creation method");
+        exec("/usr/local/hestia/bin/v-add-web-domain $targetUser $domain 'default' 'no' '' '' '' '' '' '' '$proxyTemplate' 2>&1", $outputAlt, $returnVarAlt);
+
+        if ($returnVarAlt !== 0) {
+            log_message("Alternative method failed: " . implode("\n", $outputAlt));
+
+            // Шаг 7.2: Используем низкоуровневый подход
+            log_message("Using low-level approach");
+            create_domain_low_level($domain, $targetUser, $proxyTemplate, $ssl);
+        }
+    }
+
+    // Шаг 8: Проверяем, что домен создан у целевого пользователя
+    exec("/usr/local/hestia/bin/v-list-web-domain $targetUser $domain 2>/dev/null", $checkOutput, $checkReturnVar);
+    if ($checkReturnVar !== 0) {
+        log_message("ERROR: Domain not created for target user after all attempts");
+        exec("rm -rf $tempDir");
+        return $domain; // Возвращаем домен в любом случае
+    }
+
+    log_message("Domain successfully created for target user");
+
+    // Шаг 9: Восстанавливаем содержимое сайта
+    $newWebRoot = "/home/$targetUser/web/$domain/public_html";
+
+    exec("rm -rf $newWebRoot/* 2>/dev/null");
+    exec("rm -rf $newWebRoot/.[!.]* 2>/dev/null");
+
+    if (is_dir("$tempDir/public_html")) {
+        log_message("Restoring website content");
+        exec("cp -a $tempDir/public_html/* $newWebRoot/ 2>/dev/null");
+        exec("cp -a $tempDir/public_html/.[!.]* $newWebRoot/ 2>/dev/null");
+    }
+
+    // Шаг 10: Устанавливаем права
+    exec("chown -R $targetUser:$targetUser /home/$targetUser/web/$domain");
+    exec("find $newWebRoot -type d -exec chmod 755 {} \\;");
+    exec("find $newWebRoot -type f -exec chmod 644 {} \\;");
+
+    // Шаг 11: Устанавливаем шаблон прокси
+    if (!empty($proxyTemplate)) {
+        log_message("Setting proxy template: $proxyTemplate");
+        exec("/usr/local/hestia/bin/v-change-web-domain-proxy-tpl $targetUser $domain $proxyTemplate 2>&1", $output, $returnVar);
+        if ($returnVar !== 0) {
+            log_message("Warning: Failed to set proxy template: " . implode("\n", $output));
+        }
+    }
+
+    // Шаг 12: Восстанавливаем SSL-сертификаты, если они были
+    if ($hasSsl) {
+        $newSslDir = "/home/$targetUser/conf/web/$domain/ssl";
+        if (!is_dir($newSslDir)) {
+            mkdir($newSslDir, 0755, true);
+        }
+
+        exec("cp -a $tempDir/ssl/* $newSslDir/ 2>/dev/null");
+        exec("chown -R $targetUser:$targetUser $newSslDir");
+
+        log_message("Enabling SSL for domain");
+        exec("/usr/local/hestia/bin/v-add-web-domain-ssl $targetUser $domain 2>&1", $output, $returnVar);
+
+        if ($returnVar !== 0) {
+            log_message("Warning: Failed to enable SSL: " . implode("\n", $output));
+        }
+    }
+
+    // Шаг 13: Очистка
+    exec("rm -rf $tempDir");
+
+    // Шаг 14: Перестраиваем веб-конфигурацию пользователя для применения всех изменений
+    exec("/usr/local/hestia/bin/v-rebuild-web-domains $targetUser 2>&1", $output, $returnVar);
+
+    log_message("Domain transfer completed: $domain");
+    return $domain;
+}
+
+/**
+ * Создает домен низкоуровневым методом с прямым изменением конфигурационных файлов
+ *
+ * @param string $domain Доменное имя
+ * @param string $user Пользователь
+ * @param string $proxyTemplate Шаблон прокси (по умолчанию tc-nginx-only)
+ * @param string $ssl Флаг SSL (по умолчанию no)
+ * @return string Имя домена
+ */
+function create_domain_low_level($domain, $user, $proxyTemplate = 'tc-nginx-only', $ssl = 'no') {
+    log_message("Creating domain using low-level approach: $domain for $user");
+
+    // Шаг 1: Подготавливаем директории
+    $webRoot = "/home/$user/web/$domain";
+    $publicHtml = "$webRoot/public_html";
+
+    if (!is_dir($webRoot)) {
+        mkdir($webRoot, 0755, true);
+    }
+
+    if (!is_dir($publicHtml)) {
+        mkdir($publicHtml, 0755, true);
+    }
+
+    // Шаг 2: Устанавливаем права
+    exec("chown -R $user:$user $webRoot");
+
+    // Шаг 3: Получаем IP сервера
+    exec("hostname -I | awk '{print $1}'", $ipAddress);
+    $ip = trim($ipAddress[0] ?? '');
+    if (empty($ip)) {
+        exec("curl -s ifconfig.me", $ipAddress);
+        $ip = trim($ipAddress[0] ?? '127.0.0.1');
+    }
+
+    // Шаг 4: Добавляем запись в web.conf
+    $webConfFile = "/usr/local/hestia/data/users/$user/web.conf";
+
+    if (file_exists($webConfFile)) {
+        $currentDate = date("Y-m-d H:i:s");
+
+        // Полная запись домена
+        $domainEntry = "WEB_DOMAIN='$domain' IP='$ip' IP6='' WEB_TPL='default' BACKEND='php-fpm' PROXY='$proxyTemplate' PROXY_EXT='html,htm,php' SSL='$ssl' SSL_HOME='same' STATS='' STATS_AUTH='' STATS_USER='' U_DISK='0' U_BANDWIDTH='0' SUSPENDED='no' TIME='$currentDate' DATE='$currentDate'\n";
+
+        file_put_contents($webConfFile, $domainEntry, FILE_APPEND);
+        log_message("Manually added domain entry to web.conf");
+
+        // Шаг 5: Создаем конфигурационные директории
+        $confDir = "/home/$user/conf/web/$domain";
+        if (!is_dir($confDir)) {
+            mkdir($confDir, 0755, true);
+            exec("chown $user:$user $confDir");
+        }
+
+        // Шаг 6: Перестраиваем конфигурацию пользователя
+        exec("/usr/local/hestia/bin/v-rebuild-web-domains $user");
+
+        // Шаг 7: Проверяем, что домен создан
+        exec("/usr/local/hestia/bin/v-list-web-domain $user $domain 2>/dev/null", $output, $returnVar);
+
+        if ($returnVar === 0) {
+            log_message("Low-level domain addition successful");
+        } else {
+            log_message("Warning: Low-level domain addition might have issues");
+
+            // Шаг 8: Пробуем перезапустить все сервисы
+            log_message("Restarting all services");
+            exec("/usr/local/hestia/bin/v-restart-service 'nginx'");
+            exec("/usr/local/hestia/bin/v-restart-service 'apache2'");
+            exec("/usr/local/hestia/bin/v-restart-service 'hestia'");
+
+            // Шаг 9: Еще раз перестраиваем конфигурацию пользователя
+            exec("/usr/local/hestia/bin/v-rebuild-user $user 'yes'");
+        }
+    } else {
+        log_message("Error: web.conf not found for user $user");
     }
 
     return $domain;
+}
+
+/**
+ * Очищает все следы домена в системе
+ *
+ * @param string $domain Доменное имя
+ */
+function cleanup_domain_traces($domain) {
+    log_message("Cleaning up all traces of domain: $domain");
+
+    // Шаг 1: Удаляем все физические директории домена
+    exec("find /home -name '$domain' -type d 2>/dev/null", $domainDirs);
+    foreach ($domainDirs as $dir) {
+        exec("rm -rf '$dir'");
+        log_message("Removed directory: $dir");
+    }
+
+    // Шаг 2: Удаляем все конфигурационные файлы домена
+    $escapedDomain = escapeshellarg($domain);
+
+    // Шаг 2.1: Очистка web.conf
+    exec("find /usr/local/hestia/data/users/*/web.conf -type f -exec grep -l $escapedDomain {} \\;", $webConfigs);
+    foreach ($webConfigs as $configFile) {
+        exec("grep -v $escapedDomain $configFile > $configFile.tmp && mv $configFile.tmp $configFile");
+        log_message("Cleaned domain from config: $configFile");
+    }
+
+    // Шаг 2.2: Очистка dns.conf
+    exec("find /usr/local/hestia/data/users/*/dns.conf -type f -exec grep -l $escapedDomain {} \\;", $dnsConfigs);
+    foreach ($dnsConfigs as $configFile) {
+        exec("grep -v $escapedDomain $configFile > $configFile.tmp && mv $configFile.tmp $configFile");
+        log_message("Cleaned domain from config: $configFile");
+    }
+
+    // Шаг 2.3: Очистка mail.conf
+    exec("find /usr/local/hestia/data/users/*/mail.conf -type f -exec grep -l $escapedDomain {} \\;", $mailConfigs);
+    foreach ($mailConfigs as $configFile) {
+        exec("grep -v $escapedDomain $configFile > $configFile.tmp && mv $configFile.tmp $configFile");
+        log_message("Cleaned domain from config: $configFile");
+    }
+
+    // Шаг 3: Удаляем все конфигурационные файлы веб-сервера
+    exec("find /etc/nginx/conf.d -name '*$domain*' -type f 2>/dev/null", $nginxConfigs);
+    foreach ($nginxConfigs as $config) {
+        exec("rm -f '$config'");
+        log_message("Removed nginx config: $config");
+    }
+
+    exec("find /etc/apache2/sites-enabled -name '*$domain*' -type f 2>/dev/null", $apacheConfigs);
+    foreach ($apacheConfigs as $config) {
+        exec("rm -f '$config'");
+        log_message("Removed apache config: $config");
+    }
+
+    // Шаг 4: Перезапуск сервисов для применения изменений
+    exec("/usr/local/hestia/bin/v-restart-service 'nginx' 'quiet'");
+    exec("/usr/local/hestia/bin/v-restart-service 'apache2' 'quiet'");
+
+    log_message("Domain cleanup completed");
 }
 
 function prepare_redirects_data($site, $allDomains, $isWwwDomain = false) {
