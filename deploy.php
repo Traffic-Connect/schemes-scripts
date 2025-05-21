@@ -254,13 +254,7 @@ function create_domain($domain, $user) {
     return $domain;
 }
 
-/**
- * Добавляет ограничения доступа в Nginx конфигурацию домена
- *
- * @param string $domain Доменное имя
- * @param string $user Пользователь
- * @return bool Успешность операции
- */
+
 /**
  * Добавляет ограничения доступа в Nginx конфигурацию домена
  *
@@ -280,8 +274,11 @@ function add_nginx_restrictions($domain, $user) {
         exec("chown $user:$user $confDir");
     }
 
-    // Если файл конфигурации существует и не пустой
-    if (file_exists($nginxConfPath) && filesize($nginxConfPath) > 0) {
+    // Правила, которые нужно добавить
+    $staticRule = "    # Запрет прямого доступа к static/*.html\n    location ~ ^/static/.*\\.html$ {\n        deny all;\n    }\n";
+    $redirectsRule = "    # Запрет прямого доступа к redirects.json\n    location = /redirects.json {\n        deny all;\n    }\n";
+
+    if (file_exists($nginxConfPath)) {
         $nginxConf = file_get_contents($nginxConfPath);
 
         $hasStaticRule = preg_match('/location\s+~\s+\^\/static\/.*\\\.html\$/', $nginxConf);
@@ -292,130 +289,53 @@ function add_nginx_restrictions($domain, $user) {
             return true;
         }
 
-        // Правила, которые нужно добавить
-        $rulesToAdd = "";
-        if (!$hasStaticRule) {
-            $rulesToAdd .= "    # Запрет прямого доступа к static/*.html\n    location ~ ^/static/.*\\.html$ {\n        deny all;\n    }\n\n";
-        }
-        if (!$hasRedirectsRule) {
-            $rulesToAdd .= "    # Запрет прямого доступа к redirects.json\n    location = /redirects.json {\n        deny all;\n    }\n";
-        }
+        $serverBlocks = [];
+        preg_match_all('/server\s*{(?:[^{}]|(?R))*}/', $nginxConf, $serverBlocks);
 
-        // Проверяем, содержит ли конфиг блок server
-        if (strpos($nginxConf, 'server {') !== false) {
-            // Ищем конец блока server и добавляем правила перед закрывающей скобкой
-            $lastServerPos = strrpos($nginxConf, 'server {');
-            $lastCloseBracePos = strrpos($nginxConf, '}');
+        if (!empty($serverBlocks[0])) {
+            $updatedNginxConf = $nginxConf;
 
-            if ($lastServerPos !== false && $lastCloseBracePos !== false && $lastCloseBracePos > $lastServerPos) {
-                // Добавляем правила перед последней закрывающей скобкой
-                $nginxConf = substr($nginxConf, 0, $lastCloseBracePos) . "\n\n" . $rulesToAdd . "\n" . substr($nginxConf, $lastCloseBracePos);
-                file_put_contents($nginxConfPath, $nginxConf);
-                log_message("Added rules to existing server block for $domain");
-            } else {
-                // Просто добавляем правила в конец файла
-                file_put_contents($nginxConfPath, $nginxConf . "\n\n" . $rulesToAdd);
-                log_message("Added rules to the end of config for $domain");
+            foreach ($serverBlocks[0] as $serverBlock) {
+                $updatedServerBlock = $serverBlock;
+
+                $rulesToAdd = "";
+                if (!$hasStaticRule) {
+                    $rulesToAdd .= $staticRule;
+                }
+                if (!$hasRedirectsRule) {
+                    $rulesToAdd .= $redirectsRule;
+                }
+
+                if (!empty($rulesToAdd)) {
+                    $updatedServerBlock = preg_replace('/}(\s*)$/', "\n$rulesToAdd}\$1", $serverBlock);
+                    $updatedNginxConf = str_replace($serverBlock, $updatedServerBlock, $updatedNginxConf);
+                }
             }
+
+            file_put_contents($nginxConfPath, $updatedNginxConf);
         } else {
-            // Если нет блока server, добавляем новый блок с правилами
-            $serverBlock = "\nserver {\n    listen 80;\n    server_name $domain;\n\n" . $rulesToAdd . "}\n";
-            file_put_contents($nginxConfPath, $nginxConf . $serverBlock);
-            log_message("Added new server block with rules for $domain");
+            $rulesToAdd = "";
+            if (!$hasStaticRule) {
+                $rulesToAdd .= $staticRule;
+            }
+            if (!$hasRedirectsRule) {
+                $rulesToAdd .= $redirectsRule;
+            }
+
+            $nginxConf .= "\nserver {\n    listen 80;\n    server_name _;\n\n$rulesToAdd}\n";
+            file_put_contents($nginxConfPath, $nginxConf);
         }
     } else {
-        // Создаем полноценный конфигурационный файл с нуля
-        $fullConfig = <<<EOT
-# Nginx configuration for $domain
-
-server {
-    listen 80;
-    server_name $domain;
-    
-    # Установка root директории
-    root /home/$user/web/$domain/public_html;
-    index index.php index.html index.htm;
-    
-    # Включаем сжатие (если не задано глобально)
-    gzip on;
-    gzip_comp_level 6;
-    gzip_min_length 1024;
-    gzip_types text/plain text/css application/json application/javascript application/x-javascript text/xml application/xml application/xml+rss text/javascript application/vnd.ms-fontobject application/x-font-ttf font/opentype image/svg+xml image/x-icon;
-    
-    # Кеширование статики
-    location ~* \.(jpg|jpeg|gif|png|css|js|ico|xml)$ {
-        expires 12h;
-        access_log off;
-        add_header Cache-Control "public";
-    }
-    
-    # Настройки PHP
-    location ~ \.php$ {
-        try_files \$uri =404;
-        fastcgi_split_path_info ^(.+\.php)(/.+)$;
-        fastcgi_pass unix:/run/php/php-fpm.$user.sock;
-        fastcgi_index index.php;
-        include fastcgi_params;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        fastcgi_param PATH_INFO \$fastcgi_path_info;
-        fastcgi_intercept_errors on;
-    }
-    
-    # Запрет прямого доступа к static/*.html
-    location ~ ^/static/.*\.html$ {
-        deny all;
+        $nginxConf = "server {\n    listen 80;\n    server_name _;\n\n$staticRule\n$redirectsRule}\n";
+        file_put_contents($nginxConfPath, $nginxConf);
     }
 
-    # Запрет прямого доступа к redirects.json
-    location = /redirects.json {
-        deny all;
-    }
-    
-    # Обработка несуществующих файлов
-    location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
-    }
-    
-    # Запрет доступа к скрытым файлам
-    location ~ /\.ht {
-        deny all;
-    }
-}
-EOT;
-
-        file_put_contents($nginxConfPath, $fullConfig);
-        log_message("Created comprehensive Nginx configuration for $domain");
-    }
-
-    // Устанавливаем права на файл
     exec("chown $user:$user $nginxConfPath");
     exec("chmod 644 $nginxConfPath");
 
-    // Проверяем синтаксис Nginx перед перезагрузкой
     exec("nginx -t 2>&1", $testOutput, $testReturnVar);
     if ($testReturnVar !== 0) {
         log_message("Error in Nginx configuration: " . implode("\n", $testOutput));
-
-        // В случае ошибки, создаем минимальную конфигурацию
-        $minConfig = <<<EOT
-# Минимальная конфигурация для $domain
-
-# Запрет прямого доступа к static/*.html
-location ~ ^/static/.*\.html$ {
-    deny all;
-}
-
-# Запрет прямого доступа к redirects.json
-location = /redirects.json {
-    deny all;
-}
-EOT;
-
-        file_put_contents($nginxConfPath, $minConfig);
-        exec("chown $user:$user $nginxConfPath");
-        exec("chmod 644 $nginxConfPath");
-
-        log_message("Created minimal Nginx configuration for $domain after error");
         return false;
     }
 
@@ -425,7 +345,7 @@ EOT;
         log_message("Nginx restarted successfully after adding restrictions for $domain");
         return true;
     } else {
-        log_message("Warning: Failed to restart Nginx after adding restrictions for $domain. Try manually: sudo systemctl reload nginx");
+        log_message("Warning: Failed to restart Nginx after adding restrictions for $domain");
         return false;
     }
 }
