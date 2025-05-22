@@ -12,13 +12,6 @@ class NginxManager
         $possible_paths = [
             "/home/$user/conf/web/$domain/nginx.conf",
             "/home/$user/conf/web/$domain/nginx.ssl.conf",
-            "/usr/local/hestia/data/users/$user/web/$domain/nginx.conf",
-            "/usr/local/hestia/data/users/$user/web/$domain/nginx.ssl.conf",
-            "/etc/nginx/conf.d/$domain.conf",
-            "/etc/nginx/conf.d/domains/$domain.conf",
-            "/etc/nginx/conf.d/domains/$domain.ssl.conf",
-            "/etc/nginx/sites-available/$domain",
-            "/etc/nginx/sites-enabled/$domain"
         ];
 
         $found_configs = [];
