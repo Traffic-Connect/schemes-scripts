@@ -1,7 +1,7 @@
 <?php
 
 require_once __DIR__ . '/Logger.php';
-require_once __DIR__ . '/Transliterator.php';
+require_once __DIR__ . '/CyrillicTransliterator.php';
 
 class UserManager
 {
@@ -10,7 +10,7 @@ class UserManager
      */
     public static function createSchemaUser($schemaName)
     {
-        $transliterated = Transliterator::transliterate($schemaName);
+        $transliterated = CyrillicTransliterator::transliterate($schemaName);
         $userName = strtolower(preg_replace('/\s+/', '_', $transliterated));
         $userName = preg_replace('/[^a-z0-9_]/', '', $userName);
 

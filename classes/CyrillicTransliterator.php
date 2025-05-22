@@ -1,6 +1,6 @@
 <?php
 
-class Transliterator
+class CyrillicTransliterator
 {
     /**
      * Transliterate text from Cyrillic to Latin
