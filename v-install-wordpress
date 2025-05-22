@@ -200,6 +200,51 @@ sudo -u "$USER" wp post delete 1 --force --allow-root >/dev/null 2>&1
 sudo -u "$USER" wp post delete 2 --force --allow-root >/dev/null 2>&1
 sudo -u "$USER" wp comment delete 1 --force --allow-root >/dev/null 2>&1
 
+# НОВЫЕ НАСТРОЙКИ
+
+# 1. Удаляем все страницы (включая Privacy Policy)
+PAGES=$(sudo -u "$USER" wp post list --post_type=page --format=ids --allow-root 2>/dev/null)
+if [ -n "$PAGES" ]; then
+    sudo -u "$USER" wp post delete $PAGES --force --allow-root >/dev/null 2>&1
+fi
+
+# 2. Закрываем комментарии по умолчанию
+sudo -u "$USER" wp option update default_comment_status 'closed' --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp option update default_ping_status 'closed' --allow-root >/dev/null 2>&1
+
+# 3. Устанавливаем красивые ссылки (Post name)
+sudo -u "$USER" wp rewrite structure '/%postname%/' --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp rewrite flush --allow-root >/dev/null 2>&1
+
+# 4. Удаляем все плагины
+PLUGINS=$(sudo -u "$USER" wp plugin list --status=inactive --format=csv --field=name --allow-root 2>/dev/null | tail -n +2)
+if [ -n "$PLUGINS" ]; then
+    while IFS= read -r plugin; do
+        sudo -u "$USER" wp plugin delete "$plugin" --allow-root >/dev/null 2>&1
+    done <<< "$PLUGINS"
+fi
+
+# Деактивируем и удаляем активные плагины
+ACTIVE_PLUGINS=$(sudo -u "$USER" wp plugin list --status=active --format=csv --field=name --allow-root 2>/dev/null | tail -n +2)
+if [ -n "$ACTIVE_PLUGINS" ]; then
+    while IFS= read -r plugin; do
+        sudo -u "$USER" wp plugin deactivate "$plugin" --allow-root >/dev/null 2>&1
+        sudo -u "$USER" wp plugin delete "$plugin" --allow-root >/dev/null 2>&1
+    done <<< "$ACTIVE_PLUGINS"
+fi
+
+# 5. Удаляем все темы кроме активной
+ACTIVE_THEME=$(sudo -u "$USER" wp theme status --allow-root 2>/dev/null | grep "Active theme" | awk '{print $3}')
+ALL_THEMES=$(sudo -u "$USER" wp theme list --format=csv --field=name --allow-root 2>/dev/null | tail -n +2)
+
+if [ -n "$ALL_THEMES" ] && [ -n "$ACTIVE_THEME" ]; then
+    while IFS= read -r theme; do
+        if [ "$theme" != "$ACTIVE_THEME" ]; then
+            sudo -u "$USER" wp theme delete "$theme" --allow-root >/dev/null 2>&1
+        fi
+    done <<< "$ALL_THEMES"
+fi
+
 # Установка прав доступа
 chown -R "$USER":"$USER" "$WEB_PATH"
 find "$WEB_PATH" -type d -exec chmod 755 {} \;
