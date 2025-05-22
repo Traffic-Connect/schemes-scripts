@@ -1,13 +1,13 @@
 <?php
 
-require_once 'config.php';
-require_once 'Logger.php';
-require_once 'StateManager.php';
-require_once 'ApiClient.php';
-require_once 'UserManager.php';
-require_once 'DomainManager.php';
-require_once 'RedirectsManager.php';
-require_once 'DeploymentManager.php';
+require_once 'classes/config.php';
+require_once 'classes/Logger.php';
+require_once 'classes/StateManager.php';
+require_once 'classes/ApiClient.php';
+require_once 'classes/UserManager.php';
+require_once 'classes/DomainManager.php';
+require_once 'classes/RedirectsManager.php';
+require_once 'classes/DeploymentManager.php';
 
 class Deploy
 {
