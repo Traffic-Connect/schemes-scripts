@@ -12,6 +12,13 @@ class NginxManager
         $possible_paths = [
             "/home/$user/conf/web/$domain/nginx.conf",
             "/home/$user/conf/web/$domain/nginx.ssl.conf",
+            "/usr/local/hestia/data/users/$user/web/$domain/nginx.conf",
+            "/usr/local/hestia/data/users/$user/web/$domain/nginx.ssl.conf",
+            "/etc/nginx/conf.d/$domain.conf",
+            "/etc/nginx/conf.d/domains/$domain.conf",
+            "/etc/nginx/conf.d/domains/$domain.ssl.conf",
+            "/etc/nginx/sites-available/$domain",
+            "/etc/nginx/sites-enabled/$domain"
         ];
 
         $found_configs = [];
@@ -39,6 +46,31 @@ class NginxManager
     }
 
     /**
+     * Check if server block contains the domain
+     */
+    private static function serverBlockContainsDomain($serverBlock, $domain)
+    {
+        // Look for server_name directive
+        if (preg_match('/server_name\s+([^;]+);/i', $serverBlock, $matches)) {
+            $serverNames = trim($matches[1]);
+            $domains = preg_split('/\s+/', $serverNames);
+
+            foreach ($domains as $serverDomain) {
+                // Remove quotes if present
+                $serverDomain = trim($serverDomain, '"\'');
+
+                if ($serverDomain === $domain ||
+                    $serverDomain === "www.$domain" ||
+                    ($serverDomain === substr($domain, 4) && strpos($domain, 'www.') === 0)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Add restrictions to server block
      */
     private static function addRestrictionsToConfig($configPath, $domain)
@@ -50,35 +82,66 @@ class NginxManager
             return true;
         }
 
-        // Find server block and add restrictions before closing brace
-        $pattern = '/(\s*server\s*\{[^}]*?)(\s*\})/s';
+        // Find all server blocks
+        $pattern = '/(\s*server\s*\{(?:[^{}]*+\{[^{}]*+\})*[^{}]*+)\}/s';
 
-        if (preg_match($pattern, $content, $matches)) {
-            $serverBlock = $matches[1];
-            $closingBrace = $matches[2];
+        if (preg_match_all($pattern, $content, $matches, PREG_OFFSET_CAPTURE)) {
+            $updated = false;
+            $newContent = $content;
+            $offset = 0;
 
-            // Prepare restrictions
-            $restrictions = "\n    # Security restrictions for static files and redirects\n";
-            $restrictions .= "    location ~ ^/static/.*\.html\$ {\n";
-            $restrictions .= "        deny all;\n";
-            $restrictions .= "    }\n";
-            $restrictions .= "    location = /redirects.json {\n";
-            $restrictions .= "        deny all;\n";
-            $restrictions .= "    }\n";
+            foreach ($matches[0] as $index => $match) {
+                $serverBlock = $match[0];
+                $position = $match[1] + $offset;
 
-            // Replace server block with updated one
-            $newServerBlock = $serverBlock . $restrictions;
-            $newContent = str_replace($matches[0], $newServerBlock . $closingBrace, $content);
+                // Check if this server block contains our domain
+                if (self::serverBlockContainsDomain($serverBlock, $domain)) {
+                    Logger::log("Found matching server block for domain: $domain in $configPath");
 
-            if (file_put_contents($configPath, $newContent)) {
-                Logger::log("Added restrictions to: $configPath");
-                return true;
+                    // Find the closing brace of this server block
+                    $closingBracePos = strrpos($serverBlock, '}');
+
+                    if ($closingBracePos !== false) {
+                        // Prepare restrictions
+                        $restrictions = "\n    # Security restrictions for static files and redirects\n";
+                        $restrictions .= "    location ~ ^/static/.*\.html\$ {\n";
+                        $restrictions .= "        deny all;\n";
+                        $restrictions .= "    }\n";
+                        $restrictions .= "    location = /redirects.json {\n";
+                        $restrictions .= "        deny all;\n";
+                        $restrictions .= "    }\n";
+
+                        // Insert restrictions before closing brace
+                        $updatedServerBlock = substr_replace($serverBlock, $restrictions, $closingBracePos, 0);
+
+                        // Replace in the full content
+                        $newContent = substr_replace($newContent, $updatedServerBlock, $position, strlen($serverBlock));
+
+                        // Adjust offset for next replacements
+                        $offset += strlen($restrictions);
+                        $updated = true;
+
+                        Logger::log("Added restrictions to server block for domain: $domain");
+                    }
+                } else {
+                    Logger::log("Server block does not match domain: $domain in $configPath");
+                }
+            }
+
+            if ($updated) {
+                if (file_put_contents($configPath, $newContent)) {
+                    Logger::log("Successfully updated config file: $configPath");
+                    return true;
+                } else {
+                    Logger::log("Failed to write updated config: $configPath");
+                    return false;
+                }
             } else {
-                Logger::log("Failed to write config: $configPath");
+                Logger::log("No matching server block found for domain: $domain in $configPath");
                 return false;
             }
         } else {
-            Logger::log("Could not find server block in: $configPath");
+            Logger::log("Could not find any server blocks in: $configPath");
             return false;
         }
     }
