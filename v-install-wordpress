@@ -251,6 +251,9 @@ find "$WEB_PATH" -type d -exec chmod 755 {} \;
 find "$WEB_PATH" -type f -exec chmod 644 {} \;
 chmod 600 "$WEB_PATH/wp-config.php"
 
+# Устанавливаем прокси темплейт tc-nginx-only для домена
+execute_hestia_cmd v-change-web-domain-proxy-tpl "$USER" "$DOMAIN" "tc-nginx-only" >/dev/null 2>&1
+
 # Финальная проверка установки
 if [ ! -f "wp-config.php" ]; then
     echo "Error: wp-config.php not found after installation"
