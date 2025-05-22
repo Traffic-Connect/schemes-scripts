@@ -12,8 +12,6 @@ class NginxManager
         $possible_paths = [
             "/home/$user/conf/web/$domain/nginx.conf",
             "/home/$user/conf/web/$domain/nginx.ssl.conf",
-            "/etc/nginx/conf.d/domains/$domain.conf",
-            "/etc/nginx/conf.d/domains/$domain.ssl.conf",
         ];
 
         $found_configs = [];
