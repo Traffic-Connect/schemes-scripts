@@ -1,7 +1,6 @@
 <?php
 
 require_once __DIR__ . '/Logger.php';
-require_once __DIR__ . '/NginxManager.php';
 
 class DomainManager
 {
@@ -19,7 +18,6 @@ class DomainManager
         exec("/usr/local/hestia/bin/v-list-web-domain $user $domain 2>/dev/null", $output, $returnVar);
         if ($returnVar === 0) {
             Logger::log("Domain already exists for user $user: $domain");
-            NginxManager::addRestrictions($domain, $user);
             return $domain;
         }
 
@@ -32,7 +30,6 @@ class DomainManager
             if (!empty($existingUser) && $existingUser !== $user) {
                 Logger::log("Domain exists with different owner: $existingUser");
                 $domain = self::transferDomain($domain, $existingUser, $user);
-                NginxManager::addRestrictions($domain, $user);
                 return $domain;
             }
         }
@@ -53,7 +50,6 @@ class DomainManager
                 Logger::log("Warning: Failed to apply proxy template for $domain");
             }
 
-            NginxManager::addRestrictions($domain, $user);
             return $domain;
         }
 
@@ -64,7 +60,6 @@ class DomainManager
 
         if ($returnVarAlt === 0) {
             Logger::log("Alternative domain creation successful");
-            NginxManager::addRestrictions($domain, $user);
             return $domain;
         }
 
@@ -72,7 +67,6 @@ class DomainManager
         Logger::log("Using low-level approach");
 
         $domain = self::createDomainLowLevel($domain, $user);
-        NginxManager::addRestrictions($domain, $user);
 
         return $domain;
     }

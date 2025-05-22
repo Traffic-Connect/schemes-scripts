@@ -9,7 +9,7 @@ require_once 'classes/DomainManager.php';
 require_once 'classes/RedirectsManager.php';
 require_once 'classes/DeploymentManager.php';
 
-class Deploy
+class SchemaDeployer
 {
     /**
      * Initialize required directories
@@ -168,4 +168,4 @@ class Deploy
     }
 }
 
-Deploy::main();
+SchemaDeployer::main();
