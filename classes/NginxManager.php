@@ -1,6 +1,6 @@
 <?php
 
-require_once 'Logger.php';
+require_once __DIR__ . '/Logger.php';
 
 class NginxManager
 {

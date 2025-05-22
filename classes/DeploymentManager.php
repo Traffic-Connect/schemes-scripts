@@ -1,13 +1,8 @@
 <?php
 
-require_once 'classes/config.php';
-require_once 'classes/Logger.php';
-require_once 'classes/StateManager.php';
-require_once 'classes/ApiClient.php';
-require_once 'classes/UserManager.php';
-require_once 'classes/DomainManager.php';
-require_once 'classes/RedirectsManager.php';
-require_once 'classes/DeploymentManager.php';
+require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/Logger.php';
+require_once __DIR__ . '/RedirectsManager.php';
 
 class Deploy
 {

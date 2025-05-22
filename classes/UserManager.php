@@ -1,7 +1,7 @@
 <?php
 
-require_once 'Logger.php';
-require_once 'Transliterator.php';
+require_once __DIR__ . '/Logger.php';
+require_once __DIR__ . '/Transliterator.php';
 
 class UserManager
 {

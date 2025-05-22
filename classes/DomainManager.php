@@ -1,7 +1,7 @@
 <?php
 
-require_once 'Logger.php';
-require_once 'NginxManager.php';
+require_once __DIR__ . '/Logger.php';
+require_once __DIR__ . '/NginxManager.php';
 
 class DomainManager
 {
