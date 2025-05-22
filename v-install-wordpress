@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# Временное включение отладки (уберите после исправления ошибки)
+set -e  # Остановка при первой ошибке
+exec > >(tee -a /tmp/wp-install-debug.log)
+exec 2>&1
+
 # Аргументы: $1=user $2=domain $3=title $4=admin_user $5=admin_pass $6=admin_email
 USER=$1
 DOMAIN=$2
