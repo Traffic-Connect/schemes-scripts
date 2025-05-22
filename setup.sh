@@ -25,10 +25,16 @@ echo "Setting up Hestia v-install-wordpress command..."
 
 # Copy the v-install-wordpress script to Hestia bin directory
 if [ -f "./v-install-wordpress" ]; then
+    # Always copy and update the script (even if it exists)
     cp ./v-install-wordpress /usr/local/hestia/bin/v-install-wordpress
     chmod +x /usr/local/hestia/bin/v-install-wordpress
-   v-install-wordpress
-    echo "Added v-install-wordpress command to Hestia"
+
+    # Check if script was updated or newly added
+    if [ -f "/usr/local/hestia/bin/v-install-wordpress" ]; then
+        echo "Updated v-install-wordpress command in Hestia"
+    else
+        echo "Added v-install-wordpress command to Hestia"
+    fi
 else
     echo "Warning: v-install-wordpress script not found in current directory"
 fi
@@ -107,5 +113,5 @@ echo "- Temp directory: /root/schemas/temp/"
 echo "- Log file: /root/schemas/schema_deploy.log"
 echo "- Cron log: /root/schemas/cron.log"
 echo "- Cron job: runs every minute"
-echo "- Hestia command: v-install-wordpress added"
+echo "- Hestia command: v-install-wordpress updated"
 echo "- Hestia API: enabled with IP restrictions"

@@ -45,7 +45,7 @@ class DomainManager
         if ($returnVar === 0) {
             Logger::log("Domain created successfully: $domain");
 
-            exec("/usr/local/hestia/bin/v-change-web-domain-proxy-tpl $user $domain tc-schemes", $output, $returnVar);
+            exec("/usr/local/hestia/bin/v-change-web-domain-proxy-tpl $user $domain tc-nginx-only", $output, $returnVar);
             if ($returnVar !== 0) {
                 Logger::log("Warning: Failed to apply proxy template for $domain");
             }
@@ -56,7 +56,7 @@ class DomainManager
         Logger::log("Standard domain creation failed: " . implode("\n", $output));
 
         Logger::log("Trying alternative domain creation method");
-        exec("/usr/local/hestia/bin/v-add-web-domain $user $domain 'default' 'no' '' '' '' '' '' '' 'tc-schemes' 2>&1", $outputAlt, $returnVarAlt);
+        exec("/usr/local/hestia/bin/v-add-web-domain $user $domain 'default' 'no' '' '' '' '' '' '' 'tc-nginx-only' 2>&1", $outputAlt, $returnVarAlt);
 
         if ($returnVarAlt === 0) {
             Logger::log("Alternative domain creation successful");
