@@ -52,6 +52,9 @@ class DeploymentManager
 
         Logger::log("Deploying: $domain");
 
+        // Check and set proxy template if needed
+        self::checkAndSetProxyTemplate($domain, $user);
+
         if (is_dir($webRoot)) {
             exec("cp -r $webRoot $backupDir");
             $hasBackup = is_dir($backupDir);
@@ -136,6 +139,37 @@ class DeploymentManager
             Logger::log("Deployment successful: $domain");
         } else {
             Logger::log("Deployment issues: $domain");
+        }
+    }
+
+    /**
+     * Check if domain has tc-nginx-only proxy template and set it if not
+     */
+    private static function checkAndSetProxyTemplate($domain, $user)
+    {
+        $cmd = "sudo /usr/local/hestia/bin/v-list-web-domain $user $domain json";
+        $output = shell_exec($cmd);
+        $domainData = json_decode($output, true);
+
+        if ($domainData && isset($domainData[$domain])) {
+            $currentProxyTemplate = $domainData[$domain]['PROXY'] ?? '';
+
+            if ($currentProxyTemplate !== 'tc-nginx-only') {
+                Logger::log("Setting proxy template tc-nginx-only for domain: $domain");
+
+                $setProxyCmd = "sudo /usr/local/hestia/bin/v-change-web-domain-proxy-tpl $user $domain tc-nginx-only";
+                $result = exec($setProxyCmd, $output, $returnCode);
+
+                if ($returnCode === 0) {
+                    Logger::log("Proxy template tc-nginx-only set successfully for: $domain");
+                } else {
+                    Logger::log("Failed to set proxy template for: $domain. Error: " . implode("\n", $output));
+                }
+            } else {
+                Logger::log("Domain $domain already has tc-nginx-only proxy template");
+            }
+        } else {
+            Logger::log("Could not retrieve domain information for: $domain");
         }
     }
 

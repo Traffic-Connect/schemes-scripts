@@ -15,6 +15,29 @@ if [ -z "$USER" ] || [ -z "$DOMAIN" ] || [ -z "$TITLE" ] || [ -z "$ADMIN_USER" ]
     exit 1
 fi
 
+# Проверка существования пользователя в Hestia
+USER_EXISTS=$(/usr/local/hestia/bin/v-list-user "$USER" plain 2>/dev/null)
+
+if [ $? -ne 0 ] || [ -z "$USER_EXISTS" ]; then
+    echo "Пользователь '$USER' не найден. Создаю нового пользователя..."
+
+    # Генерация временного пароля
+    USER_PASS=$(openssl rand -base64 12 | tr -d '/+=' | cut -c1-12)
+    USER_EMAIL="${USER}@localhost.localdomain"
+
+    # Создание пользователя
+    CREATE_USER_OUTPUT=$(/usr/local/hestia/bin/v-add-user "$USER" "$USER_PASS" "$USER_EMAIL" 2>&1)
+    if [ $? -ne 0 ]; then
+        echo "Error: Не удалось создать пользователя Hestia: $CREATE_USER_OUTPUT"
+        exit 1
+    fi
+
+    echo "Пользователь '$USER' создан. Пароль: $USER_PASS"
+    # (по желанию можешь логировать этот пароль в файл или куда нужно)
+fi
+
+
+
 # Пути и переменные БД
 WEB_PATH="/home/$USER/web/$DOMAIN/public_html"
 
