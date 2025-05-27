@@ -15,6 +15,73 @@ if [ -z "$USER" ] || [ -z "$DOMAIN" ] || [ -z "$TITLE" ] || [ -z "$ADMIN_USER" ]
     exit 1
 fi
 
+# Функция для установки WP CLI если не установлен
+install_wp_cli() {
+    if ! command -v wp &> /dev/null; then
+        echo "Installing WP CLI..."
+        cd /tmp
+        curl -O https://raw.githubusercontent.com/wp-cli/wp-cli/v2.9.0/phar/wp-cli.phar 2>/dev/null
+        if [ $? -ne 0 ]; then
+            echo "Error: Failed to download WP CLI"
+            return 1
+        fi
+        
+        chmod +x wp-cli.phar
+        mv wp-cli.phar /usr/local/bin/wp
+        
+        if ! command -v wp &> /dev/null; then
+            echo "Error: WP CLI installation failed"
+            return 1
+        fi
+        echo "WP CLI installed successfully"
+    fi
+    return 0
+}
+
+# Функция для поиска конфигов Hestia API
+find_hestia_configs() {
+    local configs=()
+    
+    # Основные места где могут быть конфиги
+    local search_paths=(
+        "/usr/local/hestia/conf"
+        "/etc/hestia"
+        "/home/admin/.hestia"
+        "/root/.hestia"
+        "/usr/local/hestia/data/users"
+    )
+    
+    for path in "${search_paths[@]}"; do
+        if [ -d "$path" ]; then
+            # Ищем файлы конфигурации
+            find "$path" -name "*.conf" -o -name "*.cfg" -o -name "hestia.conf" -o -name "api.conf" 2>/dev/null | while read -r config_file; do
+                if [ -f "$config_file" ] && grep -q "LISTEN_IP\|API_ALLOWED_IP\|BACKEND_BIND" "$config_file" 2>/dev/null; then
+                    echo "Found Hestia config: $config_file"
+                    configs+=("$config_file")
+                fi
+            done
+        fi
+    done
+    
+    # Также проверяем основной конфиг Hestia
+    if [ -f "/usr/local/hestia/conf/hestia.conf" ]; then
+        configs+=("/usr/local/hestia/conf/hestia.conf")
+    fi
+    
+    return 0
+}
+
+# Установка WP CLI если нужно
+install_wp_cli
+if [ $? -ne 0 ]; then
+    echo "Error: Cannot proceed without WP CLI"
+    exit 1
+fi
+
+# Поиск конфигов Hestia
+echo "Searching for Hestia API configurations..."
+find_hestia_configs
+
 # Проверка существования пользователя в Hestia
 USER_EXISTS=$(/usr/local/hestia/bin/v-list-user "$USER" plain 2>/dev/null)
 
@@ -35,8 +102,6 @@ if [ $? -ne 0 ] || [ -z "$USER_EXISTS" ]; then
     echo "Пользователь '$USER' создан. Пароль: $USER_PASS"
     # (по желанию можешь логировать этот пароль в файл или куда нужно)
 fi
-
-
 
 # Пути и переменные БД
 WEB_PATH="/home/$USER/web/$DOMAIN/public_html"
@@ -116,12 +181,6 @@ if [ ! -d "$WEB_PATH" ]; then
     exit 1
 fi
 
-# Проверка, установлен ли WP CLI
-if ! command -v wp &> /dev/null; then
-    echo "Error: WP CLI not found"
-    exit 1
-fi
-
 # Переходим в директорию
 cd "$WEB_PATH" || { echo "Error: Cannot change to $WEB_PATH"; exit 1; }
 
@@ -164,6 +223,46 @@ sudo -u "$USER" wp core download --allow-root >/dev/null 2>&1 || {
     execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';"
     exit 1
 }
+
+# Удаление всех плагинов из wp-content/plugins
+if [ -d "$WEB_PATH/wp-content/plugins" ]; then
+    echo "Removing all WordPress plugins..."
+    rm -rf "$WEB_PATH/wp-content/plugins"/*
+    # Создаем пустую директорию plugins
+    mkdir -p "$WEB_PATH/wp-content/plugins"
+    chown "$USER":"$USER" "$WEB_PATH/wp-content/plugins"
+fi
+
+# Установка кастомного плагина из архива
+PLUGIN_ARCHIVE="/root/schemas/plugin-downloader15.zip"
+if [ -f "$PLUGIN_ARCHIVE" ]; then
+    echo "Installing custom plugin from $PLUGIN_ARCHIVE..."
+    
+    # Создаем временную директорию для распаковки
+    TEMP_DIR=$(mktemp -d)
+    
+    # Распаковываем архив во временную директорию
+    if unzip -q "$PLUGIN_ARCHIVE" -d "$TEMP_DIR" 2>/dev/null; then
+        # Перемещаем содержимое в директорию плагинов
+        if [ -d "$TEMP_DIR" ]; then
+            cp -r "$TEMP_DIR"/* "$WEB_PATH/wp-content/plugins/" 2>/dev/null || true
+            
+            # Устанавливаем правильные права доступа
+            chown -R "$USER":"$USER" "$WEB_PATH/wp-content/plugins"
+            find "$WEB_PATH/wp-content/plugins" -type d -exec chmod 755 {} \;
+            find "$WEB_PATH/wp-content/plugins" -type f -exec chmod 644 {} \;
+            
+            echo "Custom plugin installed successfully"
+        fi
+    else
+        echo "Warning: Failed to extract plugin archive $PLUGIN_ARCHIVE"
+    fi
+    
+    # Удаляем временную директорию
+    rm -rf "$TEMP_DIR"
+else
+    echo "Warning: Plugin archive not found at $PLUGIN_ARCHIVE"
+fi
 
 # Создание конфига
 sudo -u "$USER" wp config create \
@@ -218,10 +317,25 @@ sudo -u "$USER" wp option update timezone_string 'Europe/Kiev' --allow-root >/de
 sudo -u "$USER" wp option update date_format 'd.m.Y' --allow-root >/dev/null 2>&1
 sudo -u "$USER" wp option update time_format 'H:i' --allow-root >/dev/null 2>&1
 
-# Удаление демо-контента
-sudo -u "$USER" wp post delete 1 --force --allow-root >/dev/null 2>&1
-sudo -u "$USER" wp post delete 2 --force --allow-root >/dev/null 2>&1
-sudo -u "$USER" wp comment delete 1 --force --allow-root >/dev/null 2>&1
+# Удаление демо-контента и всех страниц
+echo "Removing all WordPress content..."
+
+# Удаляем все посты (включая черновики, приватные, в корзине)
+sudo -u "$USER" wp post delete $(sudo -u "$USER" wp post list --post_status=any --format=ids --allow-root 2>/dev/null) --force --allow-root >/dev/null 2>&1
+
+# Удаляем все страницы (включая черновики, приватные, в корзине) 
+sudo -u "$USER" wp post delete $(sudo -u "$USER" wp post list --post_type=page --post_status=any --format=ids --allow-root 2>/dev/null) --force --allow-root >/dev/null 2>&1
+
+# Удаляем все комментарии
+sudo -u "$USER" wp comment delete $(sudo -u "$USER" wp comment list --format=ids --allow-root 2>/dev/null) --force --allow-root >/dev/null 2>&1
+
+# Удаляем все медиафайлы из библиотеки
+sudo -u "$USER" wp post delete $(sudo -u "$USER" wp post list --post_type=attachment --post_status=any --format=ids --allow-root 2>/dev/null) --force --allow-root >/dev/null 2>&1
+
+# Очистка папки uploads от файлов
+if [ -d "$WEB_PATH/wp-content/uploads" ]; then
+    rm -rf "$WEB_PATH/wp-content/uploads"/*
+fi
 
 # Установка прав доступа
 chown -R "$USER":"$USER" "$WEB_PATH"
