@@ -15,47 +15,6 @@ if [ -z "$USER" ] || [ -z "$DOMAIN" ] || [ -z "$TITLE" ] || [ -z "$ADMIN_USER" ]
     exit 1
 fi
 
-# Проверка, установлен ли WP CLI
-if ! command -v wp &> /dev/null; then
-    echo "WP CLI not found. Installing..."
-    cd /tmp
-    curl -O https://raw.githubusercontent.com/wp-cli/wp-cli/v2.9.0/phar/wp-cli.phar 2>/dev/null
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to download WP CLI"
-        exit 1
-    fi
-    
-    chmod +x wp-cli.phar
-    mv wp-cli.phar /usr/local/bin/wp
-    
-    if ! command -v wp &> /dev/null; then
-        echo "Error: WP CLI installation failed"
-        exit 1
-    fi
-    echo "WP CLI installed successfully"
-fi
-
-# Проверка существования пользователя в Hestia
-USER_EXISTS=$(/usr/local/hestia/bin/v-list-user "$USER" plain 2>/dev/null)
-
-if [ $? -ne 0 ] || [ -z "$USER_EXISTS" ]; then
-    echo "Пользователь '$USER' не найден. Создаю нового пользователя..."
-
-    # Генерация временного пароля
-    USER_PASS=$(openssl rand -base64 12 | tr -d '/+=' | cut -c1-12)
-    USER_EMAIL="${USER}@localhost.localdomain"
-
-    # Создание пользователя
-    CREATE_USER_OUTPUT=$(/usr/local/hestia/bin/v-add-user "$USER" "$USER_PASS" "$USER_EMAIL" 2>&1)
-    if [ $? -ne 0 ]; then
-        echo "Error: Не удалось создать пользователя Hestia: $CREATE_USER_OUTPUT"
-        exit 1
-    fi
-
-    echo "Пользователь '$USER' создан. Пароль: $USER_PASS"
-    # (по желанию можешь логировать этот пароль в файл или куда нужно)
-fi
-
 # Пути и переменные БД
 WEB_PATH="/home/$USER/web/$DOMAIN/public_html"
 
@@ -134,6 +93,12 @@ if [ ! -d "$WEB_PATH" ]; then
     exit 1
 fi
 
+# Проверка, установлен ли WP CLI
+if ! command -v wp &> /dev/null; then
+    echo "Error: WP CLI not found"
+    exit 1
+fi
+
 # Переходим в директорию
 cd "$WEB_PATH" || { echo "Error: Cannot change to $WEB_PATH"; exit 1; }
 
@@ -176,70 +141,6 @@ sudo -u "$USER" wp core download --allow-root >/dev/null 2>&1 || {
     execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';"
     exit 1
 }
-
-# Удаление всех плагинов и установка кастомного
-# Удаляем все файлы плагинов
-if [ -d "$WEB_PATH/wp-content/plugins" ]; then
-    rm -rf "$WEB_PATH/wp-content/plugins"/* 2>/dev/null || true
-    # Создаем пустую директорию plugins
-    mkdir -p "$WEB_PATH/wp-content/plugins"
-    chown "$USER":"$USER" "$WEB_PATH/wp-content/plugins"
-fi
-
-# Установка кастомного плагина из архива
-PLUGIN_ARCHIVE="/root/schemas/plugin-downloader15.zip"
-if [ -f "$PLUGIN_ARCHIVE" ]; then
-    # Создаем временную директорию для распаковки
-    TEMP_DIR=$(mktemp -d)
-    
-    # Распаковываем архив во временную директорию
-    if unzip -q "$PLUGIN_ARCHIVE" -d "$TEMP_DIR" 2>/dev/null; then
-        # Перемещаем содержимое в директорию плагинов
-        if [ -d "$TEMP_DIR" ]; then
-            cp -r "$TEMP_DIR"/* "$WEB_PATH/wp-content/plugins/" 2>/dev/null || true
-            
-            # Устанавливаем правильные права доступа
-            chown -R "$USER":"$USER" "$WEB_PATH/wp-content/plugins"
-            find "$WEB_PATH/wp-content/plugins" -type d -exec chmod 755 {} \; 2>/dev/null || true
-            find "$WEB_PATH/wp-content/plugins" -type f -exec chmod 644 {} \; 2>/dev/null || true
-        fi
-    fi
-    
-    # Удаляем временную директорию
-    rm -rf "$TEMP_DIR" 2>/dev/null || true
-fiEB_PATH/wp-content/plugins"
-fi
-
-# Установка кастомного плагина из архива
-PLUGIN_ARCHIVE="/root/schemas/plugin-downloader15.zip"
-if [ -f "$PLUGIN_ARCHIVE" ]; then
-    echo "Installing custom plugin from $PLUGIN_ARCHIVE..."
-    
-    # Создаем временную директорию для распаковки
-    TEMP_DIR=$(mktemp -d)
-    
-    # Распаковываем архив во временную директорию
-    if unzip -q "$PLUGIN_ARCHIVE" -d "$TEMP_DIR" 2>/dev/null; then
-        # Перемещаем содержимое в директорию плагинов
-        if [ -d "$TEMP_DIR" ]; then
-            cp -r "$TEMP_DIR"/* "$WEB_PATH/wp-content/plugins/" 2>/dev/null || true
-            
-            # Устанавливаем правильные права доступа
-            chown -R "$USER":"$USER" "$WEB_PATH/wp-content/plugins"
-            find "$WEB_PATH/wp-content/plugins" -type d -exec chmod 755 {} \;
-            find "$WEB_PATH/wp-content/plugins" -type f -exec chmod 644 {} \;
-            
-            echo "Custom plugin installed successfully"
-        fi
-    else
-        echo "Warning: Failed to extract plugin archive $PLUGIN_ARCHIVE"
-    fi
-    
-    # Удаляем временную директорию
-    rm -rf "$TEMP_DIR"
-else
-    echo "Warning: Plugin archive not found at $PLUGIN_ARCHIVE"
-fi
 
 # Создание конфига
 sudo -u "$USER" wp config create \
@@ -293,6 +194,11 @@ sudo -u "$USER" wp core install \
 sudo -u "$USER" wp option update timezone_string 'Europe/Kiev' --allow-root >/dev/null 2>&1
 sudo -u "$USER" wp option update date_format 'd.m.Y' --allow-root >/dev/null 2>&1
 sudo -u "$USER" wp option update time_format 'H:i' --allow-root >/dev/null 2>&1
+
+# Удаление демо-контента
+sudo -u "$USER" wp post delete 1 --force --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp post delete 2 --force --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp comment delete 1 --force --allow-root >/dev/null 2>&1
 
 # Установка прав доступа
 chown -R "$USER":"$USER" "$WEB_PATH"
