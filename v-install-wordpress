@@ -317,24 +317,7 @@ sudo -u "$USER" wp option update timezone_string 'Europe/Kiev' --allow-root >/de
 sudo -u "$USER" wp option update date_format 'd.m.Y' --allow-root >/dev/null 2>&1
 sudo -u "$USER" wp option update time_format 'H:i' --allow-root >/dev/null 2>&1
 
-# Удаление демо-контента и всех страниц
-echo "Removing all WordPress content..."
-
-# Удаляем все посты (включая черновики, приватные, в корзине)
-sudo -u "$USER" wp post delete $(sudo -u "$USER" wp post list --post_status=any --format=ids --allow-root 2>/dev/null) --force --allow-root >/dev/null 2>&1
-
-# Удаляем все страницы (включая черновики, приватные, в корзине) 
-sudo -u "$USER" wp post delete $(sudo -u "$USER" wp post list --post_type=page --post_status=any --format=ids --allow-root 2>/dev/null) --force --allow-root >/dev/null 2>&1
-
-# Удаляем все комментарии
-sudo -u "$USER" wp comment delete $(sudo -u "$USER" wp comment list --format=ids --allow-root 2>/dev/null) --force --allow-root >/dev/null 2>&1
-
-# Удаляем все медиафайлы из библиотеки
-sudo -u "$USER" wp post delete $(sudo -u "$USER" wp post list --post_type=attachment --post_status=any --format=ids --allow-root 2>/dev/null) --force --allow-root >/dev/null 2>&1
-
-# Очистка папки uploads от файлов
-if [ -d "$WEB_PATH/wp-content/uploads" ]; then
-    rm -rf "$WEB_PATH/wp-content/uploads"/*
+rm -rf "$WEB_PATH/wp-content/uploads"/*
 fi
 
 # Установка прав доступа
