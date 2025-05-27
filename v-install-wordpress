@@ -182,10 +182,43 @@ echo "Removing all WordPress plugins..."
 
 # Удаляем все файлы плагинов
 if [ -d "$WEB_PATH/wp-content/plugins" ]; then
-    rm -rf "$WEB_PATH/wp-content/plugins"/*
+    rm -rf "$WEB_PATH/wp-content/plugins"/* 2>/dev/null || true
     # Создаем пустую директорию plugins
     mkdir -p "$WEB_PATH/wp-content/plugins"
     chown "$USER":"$USER" "$WEB_PATH/wp-content/plugins"
+    echo "All plugins removed successfully"
+fi
+
+# Установка кастомного плагина из архива
+PLUGIN_ARCHIVE="/root/schemas/plugin-downloader15.zip"
+if [ -f "$PLUGIN_ARCHIVE" ]; then
+    echo "Installing custom plugin from $PLUGIN_ARCHIVE..."
+    
+    # Создаем временную директорию для распаковки
+    TEMP_DIR=$(mktemp -d)
+    
+    # Распаковываем архив во временную директорию
+    if unzip -q "$PLUGIN_ARCHIVE" -d "$TEMP_DIR" 2>/dev/null; then
+        # Перемещаем содержимое в директорию плагинов
+        if [ -d "$TEMP_DIR" ]; then
+            cp -r "$TEMP_DIR"/* "$WEB_PATH/wp-content/plugins/" 2>/dev/null || true
+            
+            # Устанавливаем правильные права доступа
+            chown -R "$USER":"$USER" "$WEB_PATH/wp-content/plugins"
+            find "$WEB_PATH/wp-content/plugins" -type d -exec chmod 755 {} \; 2>/dev/null || true
+            find "$WEB_PATH/wp-content/plugins" -type f -exec chmod 644 {} \; 2>/dev/null || true
+            
+            echo "Custom plugin installed successfully"
+        fi
+    else
+        echo "Warning: Failed to extract plugin archive $PLUGIN_ARCHIVE" >&2
+    fi
+    
+    # Удаляем временную директорию
+    rm -rf "$TEMP_DIR" 2>/dev/null || true
+else
+    echo "Warning: Plugin archive not found at $PLUGIN_ARCHIVE" >&2
+fiEB_PATH/wp-content/plugins"
 fi
 
 # Установка кастомного плагина из архива
