@@ -240,6 +240,11 @@ sudo -u "$USER" wp option update timezone_string 'Europe/Kiev' --allow-root >/de
 sudo -u "$USER" wp option update date_format 'd.m.Y' --allow-root >/dev/null 2>&1
 sudo -u "$USER" wp option update time_format 'H:i' --allow-root >/dev/null 2>&1
 
+# Устанавливаем структуру постоянных ссылок на "Post name" (/%postname%/)
+echo "Setting permalink structure to Post name..." >> "$LOG_FILE"
+sudo -u "$USER" wp rewrite structure '/%postname%/' --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp rewrite flush --allow-root >/dev/null 2>&1
+
 # Удаление демо-контента
 sudo -u "$USER" wp post delete 1 --force --allow-root >/dev/null 2>&1
 sudo -u "$USER" wp post delete 2 --force --allow-root >/dev/null 2>&1
