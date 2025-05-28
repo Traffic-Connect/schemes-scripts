@@ -135,19 +135,19 @@ fi
 echo "Setting up Nginx templates..."
 
 # Copy tc-nginx-only.stpl template
-if [ -f "./tc-nginx-only.stpl" ]; then
+if [ -f "./templates/tc-nginx-only.stpl" ]; then
     TARGET_STPL="/usr/local/hestia/data/templates/web/nginx/tc-nginx-only.stpl"
-    cp ./tc-nginx-only.stpl "$TARGET_STPL"
+    cp ./templates/tc-nginx-only.stpl "$TARGET_STPL"
     chmod 644 "$TARGET_STPL"
     echo "Copied tc-nginx-only.stpl template"
 else
-    echo "Warning: tc-nginx-only.stpl template not found in current directory"
+    echo "Warning: tc-nginx-only.stpl template not found in ./templates/ directory"
 fi
 
 # Copy tc-nginx-only.tpl template
-if [ -f "./tc-nginx-only.tpl" ]; then
+if [ -f "./templates/tc-nginx-only.tpl" ]; then
     TARGET_TPL="/usr/local/hestia/data/templates/web/nginx/tc-nginx-only.tpl"
-    cp ./tc-nginx-only.tpl "$TARGET_TPL"
+    cp ./templates/tc-nginx-only.tpl "$TARGET_TPL"
     chmod 644 "$TARGET_TPL"
     echo "Copied tc-nginx-only.tpl template"
 else
