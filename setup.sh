@@ -135,19 +135,19 @@ fi
 echo "Setting up Nginx templates..."
 
 # Copy tc-nginx-only.stpl template
-if [ -f "./tc-nginx-only.stpl" ]; then
+if [ -f "./templates/tc-nginx-only.stpl" ]; then
     TARGET_STPL="/usr/local/hestia/data/templates/web/nginx/tc-nginx-only.stpl"
-    cp ./tc-nginx-only.stpl "$TARGET_STPL"
+    cp ./templates/tc-nginx-only.stpl "$TARGET_STPL"
     chmod 644 "$TARGET_STPL"
     echo "Copied tc-nginx-only.stpl template"
 else
-    echo "Warning: tc-nginx-only.stpl template not found in current directory"
+    echo "Warning: tc-nginx-only.stpl template not found in ./templates/ directory"
 fi
 
 # Copy tc-nginx-only.tpl template
-if [ -f "./tc-nginx-only.tpl" ]; then
+if [ -f "./templates/tc-nginx-only.tpl" ]; then
     TARGET_TPL="/usr/local/hestia/data/templates/web/nginx/tc-nginx-only.tpl"
-    cp ./tc-nginx-only.tpl "$TARGET_TPL"
+    cp ./templates/tc-nginx-only.tpl "$TARGET_TPL"
     chmod 644 "$TARGET_TPL"
     echo "Copied tc-nginx-only.tpl template"
 else
@@ -181,30 +181,43 @@ setup_api_ips "$API_IP1" "$API_IP2"
 
 # Rebuild web domains configuration if templates were updated
 if [ -f "/usr/local/hestia/data/templates/web/nginx/tc-nginx-only.stpl" ] || [ -f "/usr/local/hestia/data/templates/web/nginx/tc-nginx-only.tpl" ]; then
-    echo "Rebuilding web domain configurations..."
+    echo "Rebuilding web domain configurations for schemas_* users..."
 
     # Get list of all users
     USERS=$(ls /usr/local/hestia/data/users/ 2>/dev/null || echo "")
 
     if [ -n "$USERS" ]; then
-        for user in $USERS; do
-            if [ -f "/usr/local/hestia/data/users/$user/web.conf" ]; then
-                echo "Rebuilding web config for user: $user"
+        # Filter users to only process schemas_* users
+        SCHEMAS_USERS=$(echo "$USERS" | grep "^schema" || echo "")
 
-                # Read domains for this user
-                while IFS= read -r line; do
-                    if [[ $line =~ ^DOMAIN=\'([^\']+)\' ]]; then
-                        domain="${BASH_REMATCH[1]}"
+        if [ -n "$SCHEMAS_USERS" ]; then
+            for user in $SCHEMAS_USERS; do
+                if [ -f "/usr/local/hestia/data/users/$user/web.conf" ]; then
+                    echo "Rebuilding web config for schema user: $user"
 
-                        # Rebuild this domain's nginx config
-                        if command -v v-rebuild-web-domain &> /dev/null; then
-                            v-rebuild-web-domain "$user" "$domain" >/dev/null 2>&1
+                    # Read domains for this user
+                    while IFS= read -r line; do
+                        if [[ $line =~ ^DOMAIN=\'([^\']+)\' ]]; then
+                            domain="${BASH_REMATCH[1]}"
+
+                            # Rebuild this domain's nginx config
+                            if command -v v-rebuild-web-domain &> /dev/null; then
+                                echo "  - Rebuilding: $domain"
+                                v-rebuild-web-domain "$user" "$domain" >/dev/null 2>&1
+                                if [ $? -eq 0 ]; then
+                                    echo "  ✓ Rebuilt: $domain"
+                                else
+                                    echo "  ✗ Failed: $domain"
+                                fi
+                            fi
                         fi
-                    fi
-                done < "/usr/local/hestia/data/users/$user/web.conf"
-            fi
-        done
-        echo "Web configurations rebuilt"
+                    done < "/usr/local/hestia/data/users/$user/web.conf"
+                fi
+            done
+            echo "Web configurations rebuilt for schema users"
+        else
+            echo "No schema_* users found, skipping domain rebuild"
+        fi
     else
         echo "No users found, skipping domain rebuild"
     fi
@@ -240,7 +253,7 @@ echo "- Hestia command: v-install-wordpress updated"
 echo "- WP-CLI: $(wp --version --allow-root 2>/dev/null || echo 'installed and configured')"
 echo "- Nginx templates: tc-nginx-only.stpl and tc-nginx-only.tpl"
 echo "- Hestia API: enabled with IP restrictions"
-echo "- Domain configs: rebuilt if templates were updated"
+echo "- Domain configs: rebuilt for schema users only"
 echo ""
 
 # Show API config location for reference
