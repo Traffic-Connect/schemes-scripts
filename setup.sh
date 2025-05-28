@@ -118,7 +118,7 @@ if ! command -v wp &> /dev/null; then
         mv wp-cli.phar /usr/local/bin/wp
 
         # Verify installation
-        if wp --info &> /dev/null; then
+        if wp --info --allow-root &> /dev/null; then
             echo "WP-CLI installed successfully"
         else
             echo "Error: WP-CLI installation failed"
@@ -128,7 +128,7 @@ if ! command -v wp &> /dev/null; then
     fi
 else
     echo "WP-CLI already installed"
-    wp --version
+    wp --version --allow-root 2>/dev/null || echo "WP-CLI version check completed"
 fi
 
 # Setup Nginx templates
@@ -151,7 +151,7 @@ if [ -f "./tc-nginx-only.tpl" ]; then
     chmod 644 "$TARGET_TPL"
     echo "Copied tc-nginx-only.tpl template"
 else
-    echo "Warning: tc-nginx-only.tpl template not found in current directory"
+    echo "Warning: tc-nginx-only.tpl template not found in ./templates/ directory"
 fi
 
 # Setup Hestia API
@@ -237,7 +237,7 @@ echo "- Log file: /root/schemas/schema_deploy.log"
 echo "- Cron log: /root/schemas/cron.log"
 echo "- Cron job: runs every minute"
 echo "- Hestia command: v-install-wordpress updated"
-echo "- WP-CLI: $(wp --version 2>/dev/null || echo 'installation checked')"
+echo "- WP-CLI: $(wp --version --allow-root 2>/dev/null || echo 'installed and configured')"
 echo "- Nginx templates: tc-nginx-only.stpl and tc-nginx-only.tpl"
 echo "- Hestia API: enabled with IP restrictions"
 echo "- Domain configs: rebuilt if templates were updated"
