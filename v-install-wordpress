@@ -285,6 +285,36 @@ fi
 sudo -u "$USER" wp transient delete --all --allow-root >/dev/null 2>&1
 sudo -u "$USER" wp cache flush --allow-root >/dev/null 2>&1
 
+# Установка кастомного плагина из архива
+CUSTOM_PLUGIN_PATH="/root/schemas/plugin-downloader15.zip"
+if [ -f "$CUSTOM_PLUGIN_PATH" ]; then
+    echo "Installing custom plugin from $CUSTOM_PLUGIN_PATH..." >> "$LOG_FILE"
+    
+    # Устанавливаем плагин из ZIP архива
+    PLUGIN_INSTALL_RESULT=$(sudo -u "$USER" wp plugin install "$CUSTOM_PLUGIN_PATH" --allow-root 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "Custom plugin installed successfully" >> "$LOG_FILE"
+        
+        # Пытаемся активировать плагин (извлекаем имя из результата установки)
+        PLUGIN_NAME=$(echo "$PLUGIN_INSTALL_RESULT" | grep "Installing" | sed 's/.*Installing \(.*\) (.*/\1/' | tr -d '.')
+        if [ -n "$PLUGIN_NAME" ]; then
+            sudo -u "$USER" wp plugin activate "$PLUGIN_NAME" --allow-root >/dev/null 2>&1
+            echo "Custom plugin activated: $PLUGIN_NAME" >> "$LOG_FILE"
+        else
+            # Альтернативный способ - активируем по имени папки
+            PLUGIN_DIR=$(unzip -l "$CUSTOM_PLUGIN_PATH" | head -10 | grep -o '[^ ]*/\?' | head -1 | sed 's|/||')
+            if [ -n "$PLUGIN_DIR" ]; then
+                sudo -u "$USER" wp plugin activate "$PLUGIN_DIR" --allow-root >/dev/null 2>&1
+                echo "Custom plugin activated: $PLUGIN_DIR" >> "$LOG_FILE"
+            fi
+        fi
+    else
+        echo "Failed to install custom plugin: $PLUGIN_INSTALL_RESULT" >> "$LOG_FILE"
+    fi
+else
+    echo "Custom plugin not found at $CUSTOM_PLUGIN_PATH" >> "$LOG_FILE"
+fi
+
 # Установка прав доступа
 echo "Setting file permissions..." >> "$LOG_FILE"
 chown -R "$USER":"$USER" "$WEB_PATH"
