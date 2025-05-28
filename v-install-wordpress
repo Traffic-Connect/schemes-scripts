@@ -245,6 +245,41 @@ sudo -u "$USER" wp post delete 1 --force --allow-root >/dev/null 2>&1
 sudo -u "$USER" wp post delete 2 --force --allow-root >/dev/null 2>&1
 sudo -u "$USER" wp comment delete 1 --force --allow-root >/dev/null 2>&1
 
+# Получаем активную тему
+ACTIVE_THEME=$(sudo -u "$USER" wp theme status --allow-root | grep "Active:" | awk '{print $2}' 2>/dev/null)
+echo "Active theme: $ACTIVE_THEME" >> "$LOG_FILE"
+
+# Удаляем все неактивные темы
+echo "Removing inactive themes..." >> "$LOG_FILE"
+INSTALLED_THEMES=$(sudo -u "$USER" wp theme list --status=inactive --field=name --allow-root 2>/dev/null)
+if [ -n "$INSTALLED_THEMES" ]; then
+    for theme in $INSTALLED_THEMES; do
+        if [ "$theme" != "$ACTIVE_THEME" ]; then
+            echo "Deleting theme: $theme" >> "$LOG_FILE"
+            sudo -u "$USER" wp theme delete "$theme" --allow-root >/dev/null 2>&1
+        fi
+    done
+else
+    echo "No inactive themes found" >> "$LOG_FILE"
+fi
+
+# Удаляем все плагины
+echo "Removing all plugins..." >> "$LOG_FILE"
+INSTALLED_PLUGINS=$(sudo -u "$USER" wp plugin list --field=name --allow-root 2>/dev/null)
+if [ -n "$INSTALLED_PLUGINS" ]; then
+    for plugin in $INSTALLED_PLUGINS; do
+        echo "Deleting plugin: $plugin" >> "$LOG_FILE"
+        sudo -u "$USER" wp plugin deactivate "$plugin" --allow-root >/dev/null 2>&1
+        sudo -u "$USER" wp plugin delete "$plugin" --allow-root >/dev/null 2>&1
+    done
+else
+    echo "No plugins found" >> "$LOG_FILE"
+fi
+
+# Очистка транзиентов и кешей после удаления
+sudo -u "$USER" wp transient delete --all --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp cache flush --allow-root >/dev/null 2>&1
+
 # Установка прав доступа
 echo "Setting file permissions..." >> "$LOG_FILE"
 chown -R "$USER":"$USER" "$WEB_PATH"
