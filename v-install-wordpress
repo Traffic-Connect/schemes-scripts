@@ -50,6 +50,41 @@ execute_mysql() {
     return $?
 }
 
+# Функция для генерации случайного пароля
+generate_password() {
+    local length=${1:-16}
+    openssl rand -base64 32 | tr -d '/+=' | cut -c1-$length
+}
+
+# Проверяем, существует ли пользователь Hestia
+USER_EXISTS=false
+if execute_hestia_cmd v-list-user "$USER" json >/dev/null 2>&1; then
+    USER_EXISTS=true
+    echo "User $USER already exists" >> "$LOG_FILE"
+else
+    echo "User $USER does not exist, creating..." >> "$LOG_FILE"
+    
+    # Создаем пользователя Hestia
+    USER_PASSWORD=$(generate_password 16)
+    USER_EMAIL="admin@$DOMAIN"
+    
+    # Пытаемся создать пользователя
+    CREATE_USER_RESULT=$(execute_hestia_cmd v-add-user "$USER" "$USER_PASSWORD" "$USER_EMAIL" "default" "$USER")
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to create user $USER: $CREATE_USER_RESULT"
+        exit 1
+    fi
+    
+    echo "User $USER created successfully" >> "$LOG_FILE"
+    USER_EXISTS=true
+fi
+
+# Проверяем, что пользователь теперь существует
+if [ "$USER_EXISTS" = false ]; then
+    echo "Error: User $USER still does not exist after creation attempt"
+    exit 1
+fi
+
 # Проверяем, существует ли домен у какого-либо пользователя
 EXISTING_USER=""
 USERS_LIST=$(execute_hestia_cmd v-list-users json | jq -r 'keys[]' 2>/dev/null)
@@ -67,6 +102,8 @@ done
 
 # Если домен найден у другого пользователя, удаляем его
 if [ -n "$EXISTING_USER" ]; then
+    echo "Domain $DOMAIN found at user $EXISTING_USER, removing..." >> "$LOG_FILE"
+    
     # Удаляем web домен
     execute_hestia_cmd v-delete-web-domain "$EXISTING_USER" "$DOMAIN" >/dev/null 2>&1
 
@@ -80,6 +117,7 @@ if [ -n "$EXISTING_USER" ]; then
 fi
 
 # Создаем домен БЕЗ DNS и email
+echo "Creating domain $DOMAIN for user $USER..." >> "$LOG_FILE"
 CREATE_RESULT=$(execute_hestia_cmd v-add-web-domain "$USER" "$DOMAIN")
 if [ $? -ne 0 ]; then
     echo "Error: Failed to create domain: $CREATE_RESULT"
@@ -103,14 +141,17 @@ fi
 cd "$WEB_PATH" || { echo "Error: Cannot change to $WEB_PATH"; exit 1; }
 
 # Удаляем все файлы в директории (включая существующий WordPress если есть)
+echo "Cleaning directory $WEB_PATH..." >> "$LOG_FILE"
 rm -rf "$WEB_PATH"/*
 rm -rf "$WEB_PATH"/.*  2>/dev/null || true
 
 # Удаляем существующую БД если есть
+echo "Cleaning existing database $DB_NAME..." >> "$LOG_FILE"
 execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;" >/dev/null 2>&1
 execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';" >/dev/null 2>&1
 
 # Создание базы данных
+echo "Creating database $DB_NAME..." >> "$LOG_FILE"
 if ! execute_mysql "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"; then
     echo "Error: Failed to create database"
     exit 1
@@ -134,6 +175,7 @@ if ! execute_mysql "FLUSH PRIVILEGES;"; then
 fi
 
 # Скачивание WordPress
+echo "Downloading WordPress..." >> "$LOG_FILE"
 sudo -u "$USER" wp core download --allow-root >/dev/null 2>&1 || {
     echo "Error: Failed to download WordPress"
     # Очистка БД при ошибке
@@ -143,6 +185,7 @@ sudo -u "$USER" wp core download --allow-root >/dev/null 2>&1 || {
 }
 
 # Создание конфига
+echo "Creating wp-config.php..." >> "$LOG_FILE"
 sudo -u "$USER" wp config create \
     --dbname="$DB_NAME" \
     --dbuser="$DB_USER" \
@@ -174,6 +217,7 @@ if (isset($_SERVER['\''HTTP_X_FORWARDED_PROTO'\'']) && $_SERVER['\''HTTP_X_FORWA
 }' "$WEB_PATH/wp-config.php"
 
 # Установка WordPress
+echo "Installing WordPress..." >> "$LOG_FILE"
 sudo -u "$USER" wp core install \
     --url="https://$DOMAIN" \
     --title="$TITLE" \
@@ -191,6 +235,7 @@ sudo -u "$USER" wp core install \
 }
 
 # Установка базовых настроек
+echo "Configuring WordPress settings..." >> "$LOG_FILE"
 sudo -u "$USER" wp option update timezone_string 'Europe/Kiev' --allow-root >/dev/null 2>&1
 sudo -u "$USER" wp option update date_format 'd.m.Y' --allow-root >/dev/null 2>&1
 sudo -u "$USER" wp option update time_format 'H:i' --allow-root >/dev/null 2>&1
@@ -201,6 +246,7 @@ sudo -u "$USER" wp post delete 2 --force --allow-root >/dev/null 2>&1
 sudo -u "$USER" wp comment delete 1 --force --allow-root >/dev/null 2>&1
 
 # Установка прав доступа
+echo "Setting file permissions..." >> "$LOG_FILE"
 chown -R "$USER":"$USER" "$WEB_PATH"
 find "$WEB_PATH" -type d -exec chmod 755 {} \;
 find "$WEB_PATH" -type f -exec chmod 644 {} \;
@@ -216,6 +262,8 @@ if [ ! -d "wp-admin" ]; then
     echo "Error: wp-admin directory not found"
     exit 1
 fi
+
+echo "WordPress installation completed successfully for $DOMAIN" >> "$LOG_FILE"
 
 # Формируем результат
 if [ -n "$EXISTING_USER" ]; then
