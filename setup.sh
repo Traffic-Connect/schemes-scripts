@@ -181,16 +181,20 @@ setup_api_ips "$API_IP1" "$API_IP2"
 
 # Rebuild web domains configuration if templates were updated
 if [ -f "/usr/local/hestia/data/templates/web/nginx/tc-nginx-only.stpl" ] || [ -f "/usr/local/hestia/data/templates/web/nginx/tc-nginx-only.tpl" ]; then
-    echo "Rebuilding web domain configurations for schemas_* users..."
+    echo "Rebuilding web domain configurations for schemas_* users (excluding _wp suffix)..."
 
     # Get list of all users
     USERS=$(ls /usr/local/hestia/data/users/ 2>/dev/null || echo "")
 
     if [ -n "$USERS" ]; then
-        # Filter users to only process schemas_* users
-        SCHEMAS_USERS=$(echo "$USERS" | grep "^schema" || echo "")
+        # Filter users to only process schema* users that do NOT end with _wp
+        SCHEMAS_USERS=$(echo "$USERS" | grep "^schema" | grep -v "_wp$" || echo "")
 
         if [ -n "$SCHEMAS_USERS" ]; then
+            echo "Found schema users for rebuild (excluding _wp suffix):"
+            echo "$SCHEMAS_USERS"
+            echo ""
+
             for user in $SCHEMAS_USERS; do
                 if [ -f "/usr/local/hestia/data/users/$user/web.conf" ]; then
                     echo "Rebuilding web config for schema user: $user"
@@ -214,9 +218,9 @@ if [ -f "/usr/local/hestia/data/templates/web/nginx/tc-nginx-only.stpl" ] || [ -
                     done < "/usr/local/hestia/data/users/$user/web.conf"
                 fi
             done
-            echo "Web configurations rebuilt for schema users"
+            echo "Web configurations rebuilt for schema users (excluding _wp suffix)"
         else
-            echo "No schema_* users found, skipping domain rebuild"
+            echo "No schema_* users found (excluding _wp suffix), skipping domain rebuild"
         fi
     else
         echo "No users found, skipping domain rebuild"
