@@ -42,6 +42,50 @@ class DeploymentManager
     }
 
     /**
+     * Replace %domain% placeholder in all site files
+     */
+    private static function replaceDomainPlaceholder($webRoot, $domain)
+    {
+        Logger::log("Replacing domain placeholders in: $domain");
+
+        $extensions = ['html', 'css', 'js', 'txt', 'xml'];
+
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($webRoot, RecursiveDirectoryIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::LEAVES_ONLY
+        );
+
+        $processedFiles = 0;
+        $replacedFiles = 0;
+
+        foreach ($iterator as $file) {
+            if ($file->isFile()) {
+                $fileExtension = strtolower(pathinfo($file->getFilename(), PATHINFO_EXTENSION));
+
+                if (in_array($fileExtension, $extensions)) {
+                    $filePath = $file->getRealPath();
+                    $processedFiles++;
+
+                    $content = file_get_contents($filePath);
+
+                    if ($content !== false && strpos($content, '%domain%') !== false) {
+                        $newContent = str_replace('%domain%', $domain, $content);
+
+                        if (file_put_contents($filePath, $newContent) !== false) {
+                            $replacedFiles++;
+                            Logger::log("Replaced domain in: " . $file->getFilename());
+                        } else {
+                            Logger::log("Failed to write file: " . $file->getFilename());
+                        }
+                    }
+                }
+            }
+        }
+
+        Logger::log("Domain replacement completed for $domain: processed $processedFiles files, replaced in $replacedFiles files");
+    }
+
+    /**
      * Deploy ZIP archive to domain
      */
     public static function deployZip($domain, $zipUrl, $user, $redirectsData)
@@ -105,6 +149,10 @@ class DeploymentManager
                         if (file_exists("$webRoot/index.html") || file_exists("$webRoot/index.php")) {
                             $extractionSuccess = true;
                             Logger::log("Extraction successful: $domain");
+
+                            // НОВАЯ ФУНКЦИОНАЛЬНОСТЬ: Заменяем %domain% на актуальный домен
+                            self::replaceDomainPlaceholder($webRoot, $domain);
+
                         } else {
                             Logger::log("No index file: $domain");
                             self::restoreOrCreateIndex($webRoot, $backupDir, $hasBackup);
