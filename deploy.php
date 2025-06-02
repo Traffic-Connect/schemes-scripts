@@ -69,6 +69,9 @@ class SchemaDeployer
     /**
      * Process single site deployment
      */
+    /**
+     * Process single site deployment
+     */
     private static function processSite($site, $currentDomains, $schemaUser, $schemaName, &$previousState, $shouldDeploy, $zipUrl)
     {
         $originalDomain = $site['domain'];
@@ -79,10 +82,6 @@ class SchemaDeployer
         $redirectsData = RedirectsManager::prepareRedirectsData($site, $currentDomains, $isWwwDomain);
         $redirectsChanged = RedirectsManager::hasChanged($previousState, $schemaName, $hestiaDomain, $site, $currentDomains, $isWwwDomain);
         RedirectsManager::storeState($previousState, $schemaName, $hestiaDomain, $redirectsData);
-
-        if (isset($site['gsc_file_url'])) {
-            $redirectsData['gsc_file_url'] = $site['gsc_file_url'];
-        }
 
         $domainStateKey = $schemaName . '_' . $hestiaDomain;
         $domainNeverDeployed = empty($previousState[$domainStateKey]);
@@ -100,7 +99,9 @@ class SchemaDeployer
         }
 
         if ($shouldDeploy || $domainNeverDeployed || $needsDeployment) {
-            DeploymentManager::deployZip($hestiaDomain, $zipUrl, $schemaUser, $redirectsData);
+            $gscFileUrl = isset($site['gsc_file_url']) ? $site['gsc_file_url'] : null;
+
+            DeploymentManager::deployZip($hestiaDomain, $zipUrl, $schemaUser, $redirectsData, $gscFileUrl);
             $previousState[$domainStateKey] = date('Y-m-d H:i:s');
         }
     }

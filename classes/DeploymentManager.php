@@ -94,7 +94,6 @@ class DeploymentManager
             return;
         }
 
-        // Извлекаем имя файла из URL
         $gscFileName = basename(parse_url($gscFileUrl, PHP_URL_PATH));
 
         if (empty($gscFileName)) {
@@ -104,7 +103,6 @@ class DeploymentManager
 
         Logger::log("Downloading GSC file: $gscFileName from $gscFileUrl");
 
-        // Скачиваем файл
         $ch = curl_init($gscFileUrl);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
@@ -132,7 +130,7 @@ class DeploymentManager
     /**
      * Deploy ZIP archive to domain
      */
-    public static function deployZip($domain, $zipUrl, $user, $redirectsData)
+    public static function deployZip($domain, $zipUrl, $user, $redirectsData, $gscFileUrl = null)
     {
         $webRoot = "/home/$user/web/$domain/public_html";
         $backupDir = Config::TEMP_DIR . "/$domain-backup-" . time();
@@ -194,12 +192,10 @@ class DeploymentManager
                             $extractionSuccess = true;
                             Logger::log("Extraction successful: $domain");
 
-                            // Заменяем %domain% на актуальный домен
                             self::replaceDomainPlaceholder($webRoot, $domain);
 
-                            // Скачиваем и размещаем GSC файл
-                            if (isset($redirectsData['gsc_file_url'])) {
-                                self::downloadGoogleVerificationFile($webRoot, $redirectsData['gsc_file_url']);
+                            if ($gscFileUrl) {
+                                self::downloadGoogleVerificationFile($webRoot, $gscFileUrl);
                             }
 
                         } else {
