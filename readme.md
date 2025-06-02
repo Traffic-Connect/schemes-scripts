@@ -49,3 +49,5 @@ chmod +x setup.sh
 ## Лицензия
 
 Copyright (c) 2025 Traffic Connect
+root@T1-PFEU2 /usr/local/hestia/conf # nano hestia.conf
+root@T1-PFEU2 /usr/local/hestia/conf # 

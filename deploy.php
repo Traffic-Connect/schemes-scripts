@@ -80,6 +80,10 @@ class SchemaDeployer
         $redirectsChanged = RedirectsManager::hasChanged($previousState, $schemaName, $hestiaDomain, $site, $currentDomains, $isWwwDomain);
         RedirectsManager::storeState($previousState, $schemaName, $hestiaDomain, $redirectsData);
 
+        if (isset($site['gsc_file_url'])) {
+            $redirectsData['gsc_file_url'] = $site['gsc_file_url'];
+        }
+
         $domainStateKey = $schemaName . '_' . $hestiaDomain;
         $domainNeverDeployed = empty($previousState[$domainStateKey]);
         $needsDeployment = DeploymentManager::needsDeployment($hestiaDomain, $schemaUser);

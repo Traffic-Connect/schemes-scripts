@@ -86,6 +86,50 @@ class DeploymentManager
     }
 
     /**
+     * Download and place Google Search Console verification file
+     */
+    private static function downloadGoogleVerificationFile($webRoot, $gscFileUrl)
+    {
+        if (empty($gscFileUrl)) {
+            return;
+        }
+
+        // Извлекаем имя файла из URL
+        $gscFileName = basename(parse_url($gscFileUrl, PHP_URL_PATH));
+
+        if (empty($gscFileName)) {
+            Logger::log("Invalid GSC file URL: $gscFileUrl");
+            return;
+        }
+
+        Logger::log("Downloading GSC file: $gscFileName from $gscFileUrl");
+
+        // Скачиваем файл
+        $ch = curl_init($gscFileUrl);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+
+        $gscContent = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($gscContent !== false && $httpCode == 200) {
+            $gscFilePath = "$webRoot/$gscFileName";
+
+            if (file_put_contents($gscFilePath, $gscContent) !== false) {
+                chmod($gscFilePath, 0644);
+                Logger::log("GSC verification file downloaded and placed: $gscFileName");
+            } else {
+                Logger::log("Failed to save GSC file: $gscFileName");
+            }
+        } else {
+            Logger::log("Failed to download GSC file from: $gscFileUrl (HTTP: $httpCode)");
+        }
+    }
+
+    /**
      * Deploy ZIP archive to domain
      */
     public static function deployZip($domain, $zipUrl, $user, $redirectsData)
@@ -150,8 +194,13 @@ class DeploymentManager
                             $extractionSuccess = true;
                             Logger::log("Extraction successful: $domain");
 
-                            // НОВАЯ ФУНКЦИОНАЛЬНОСТЬ: Заменяем %domain% на актуальный домен
+                            // Заменяем %domain% на актуальный домен
                             self::replaceDomainPlaceholder($webRoot, $domain);
+
+                            // Скачиваем и размещаем GSC файл
+                            if (isset($redirectsData['gsc_file_url'])) {
+                                self::downloadGoogleVerificationFile($webRoot, $redirectsData['gsc_file_url']);
+                            }
 
                         } else {
                             Logger::log("No index file: $domain");
