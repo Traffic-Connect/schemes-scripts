@@ -91,7 +91,7 @@ class DomainManager
             Logger::log("Created empty public_html directory");
         }
 
-        $proxyTemplate = 'tc-schemes';
+        $proxyTemplate = 'tc-nginx-only';
         $ssl = 'no';
 
         exec("/usr/local/hestia/bin/v-list-web-domain $currentUser $domain json", $domainInfo, $returnVar);
@@ -101,7 +101,7 @@ class DomainManager
 
             if (!empty($domainSettings[$domain])) {
                 $domainSettings = $domainSettings[$domain];
-                $proxyTemplate = $domainSettings['PROXY'] ?? 'tc-schemes';
+                $proxyTemplate = $domainSettings['PROXY'] ?? 'tc-nginx-only';
                 $ssl = $domainSettings['SSL'] ?? 'no';
                 Logger::log("Retrieved domain settings: PROXY=$proxyTemplate, SSL=$ssl");
             } else {
