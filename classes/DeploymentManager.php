@@ -1,8 +1,6 @@
 <?php
 
-require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/Logger.php';
-require_once __DIR__ . '/RedirectsManager.php';
 
 class DeploymentManager
 {
@@ -42,35 +40,103 @@ class DeploymentManager
     }
 
     /**
-     * Create PHP config file for the site
+     * Deploy ZIP archive to domain - ПРОСТАЯ ВЕРСИЯ
      */
-    private static function createPhpConfig($webRoot, $originalDomain, $user)
+    public static function deployZip($domain, $zipUrl, $user, $redirectsData = null, $gscFileUrl = null, $originalDomain = null)
     {
-        $configPath = "$webRoot/config.php";
+        $webRoot = "/home/$user/web/$domain/public_html";
 
-        // Формируем URL с https:// используя оригинальный домен (с www или без)
-        $homeUrl = 'https://' . $originalDomain;
-
-        $configContent = "<?php\nreturn array (\n  'home_url' => '$homeUrl',\n);\n";
-
-        if (file_put_contents($configPath, $configContent) !== false) {
-            exec("chown $user:$user $configPath");
-            chmod($configPath, 0644);
-            Logger::log("Created config.php for $originalDomain with URL: $homeUrl");
-            return true;
-        } else {
-            Logger::log("Failed to create config.php for $originalDomain");
-            return false;
+        if ($originalDomain === null) {
+            $originalDomain = $domain;
         }
+
+        Logger::log("Deploying: $domain (original: $originalDomain)");
+
+        // Создаем папку если нет
+        if (!is_dir($webRoot)) {
+            mkdir($webRoot, 0755, true);
+            exec("chown $user:$user $webRoot");
+        }
+
+        // Скачиваем ZIP
+        $zipFile = "/tmp/$domain-" . time() . ".zip";
+
+        $ch = curl_init($zipUrl);
+        $fp = fopen($zipFile, 'w');
+        curl_setopt($ch, CURLOPT_FILE, $fp);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 300);
+
+        $success = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $fileSize = curl_getinfo($ch, CURLINFO_SIZE_DOWNLOAD);
+        curl_close($ch);
+        fclose($fp);
+
+        if (!$success || $httpCode !== 200 || !file_exists($zipFile) || $fileSize == 0) {
+            Logger::log("Download failed: $domain");
+            self::createPlaceholder($webRoot, $user);
+            return;
+        }
+
+        // Очищаем папку
+        exec("rm -rf $webRoot/* 2>/dev/null");
+        exec("rm -rf $webRoot/.[!.]* 2>/dev/null");
+
+        // Распаковываем ZIP
+        $zip = new ZipArchive;
+        if ($zip->open($zipFile) === TRUE) {
+            if ($zip->numFiles > 0) {
+                $extractResult = $zip->extractTo($webRoot);
+                $zip->close();
+
+                if ($extractResult && (file_exists("$webRoot/index.html") || file_exists("$webRoot/index.php"))) {
+                    Logger::log("Extraction successful: $domain");
+
+                    // Заменяем плейсхолдеры домена
+                    self::replaceDomainPlaceholder($webRoot, $domain);
+
+                    // Создаем config.php
+                    self::createPhpConfig($webRoot, $originalDomain, $user);
+
+                    // Скачиваем GSC файл если нужно
+                    if ($gscFileUrl) {
+                        self::downloadGoogleVerificationFile($webRoot, $gscFileUrl);
+                    }
+
+                } else {
+                    Logger::log("Extraction failed or no index file: $domain");
+                    self::createPlaceholder($webRoot, $user);
+                }
+            } else {
+                Logger::log("Empty ZIP: $domain");
+                $zip->close();
+                self::createPlaceholder($webRoot, $user);
+            }
+        } else {
+            Logger::log("Failed to open ZIP: $domain");
+            self::createPlaceholder($webRoot, $user);
+        }
+
+        // Устанавливаем права
+        exec("chown -R $user:$user $webRoot");
+        exec("find $webRoot -type d -exec chmod 755 {} \\;");
+        exec("find $webRoot -type f -exec chmod 644 {} \\;");
+
+        // Убираем ZIP файл
+        if (file_exists($zipFile)) {
+            unlink($zipFile);
+        }
+
+        Logger::log("Deployment completed: $domain");
     }
 
     /**
-     * Replace %domain% placeholder in all site files
+     * Replace %domain% placeholder in files
      */
     private static function replaceDomainPlaceholder($webRoot, $domain)
     {
-        Logger::log("Replacing domain placeholders in: $domain");
-
         $extensions = ['html', 'css', 'js', 'txt', 'xml'];
 
         $iterator = new RecursiveIteratorIterator(
@@ -78,7 +144,6 @@ class DeploymentManager
             RecursiveIteratorIterator::LEAVES_ONLY
         );
 
-        $processedFiles = 0;
         $replacedFiles = 0;
 
         foreach ($iterator as $file) {
@@ -87,29 +152,41 @@ class DeploymentManager
 
                 if (in_array($fileExtension, $extensions)) {
                     $filePath = $file->getRealPath();
-                    $processedFiles++;
-
                     $content = file_get_contents($filePath);
 
                     if ($content !== false && strpos($content, '%domain%') !== false) {
                         $newContent = str_replace('%domain%', $domain, $content);
-
                         if (file_put_contents($filePath, $newContent) !== false) {
                             $replacedFiles++;
-                            Logger::log("Replaced domain in: " . $file->getFilename());
-                        } else {
-                            Logger::log("Failed to write file: " . $file->getFilename());
                         }
                     }
                 }
             }
         }
 
-        Logger::log("Domain replacement completed for $domain: processed $processedFiles files, replaced in $replacedFiles files");
+        if ($replacedFiles > 0) {
+            Logger::log("Replaced domain placeholders in $replacedFiles files");
+        }
     }
 
     /**
-     * Download and place Google Search Console verification file
+     * Create PHP config file
+     */
+    private static function createPhpConfig($webRoot, $originalDomain, $user)
+    {
+        $configPath = "$webRoot/config.php";
+        $homeUrl = 'https://' . $originalDomain;
+        $configContent = "<?php\nreturn array (\n  'home_url' => '$homeUrl',\n);\n";
+
+        if (file_put_contents($configPath, $configContent) !== false) {
+            exec("chown $user:$user $configPath");
+            chmod($configPath, 0644);
+            Logger::log("Created config.php for $originalDomain");
+        }
+    }
+
+    /**
+     * Download Google Search Console verification file
      */
     private static function downloadGoogleVerificationFile($webRoot, $gscFileUrl)
     {
@@ -118,13 +195,9 @@ class DeploymentManager
         }
 
         $gscFileName = basename(parse_url($gscFileUrl, PHP_URL_PATH));
-
         if (empty($gscFileName)) {
-            Logger::log("Invalid GSC file URL: $gscFileUrl");
             return;
         }
-
-        Logger::log("Downloading GSC file: $gscFileName from $gscFileUrl");
 
         $ch = curl_init($gscFileUrl);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -138,214 +211,21 @@ class DeploymentManager
 
         if ($gscContent !== false && $httpCode == 200) {
             $gscFilePath = "$webRoot/$gscFileName";
-
             if (file_put_contents($gscFilePath, $gscContent) !== false) {
                 chmod($gscFilePath, 0644);
-                Logger::log("GSC verification file downloaded and placed: $gscFileName");
-            } else {
-                Logger::log("Failed to save GSC file: $gscFileName");
+                Logger::log("Downloaded GSC file: $gscFileName");
             }
-        } else {
-            Logger::log("Failed to download GSC file from: $gscFileUrl (HTTP: $httpCode)");
         }
     }
 
     /**
-     * Deploy ZIP archive to domain
+     * Create placeholder page
      */
-    public static function deployZip($domain, $zipUrl, $user, $redirectsData, $gscFileUrl = null, $originalDomain = null)
+    private static function createPlaceholder($webRoot, $user)
     {
-        $webRoot = "/home/$user/web/$domain/public_html";
-        $backupDir = Config::TEMP_DIR . "/$domain-backup-" . time();
-        $hasBackup = false;
-
-        // Если оригинальный домен не передан, используем обычный домен
-        if ($originalDomain === null) {
-            $originalDomain = $domain;
-        }
-
-        Logger::log("Deploying: $domain (original: $originalDomain)");
-
-        // Check and set proxy template if needed
-        self::setProxyTemplate($domain, $user);
-
-        if (is_dir($webRoot)) {
-            exec("cp -r $webRoot $backupDir");
-            $hasBackup = is_dir($backupDir);
-
-            exec("rm -rf $webRoot/*");
-            exec("rm -rf $webRoot/.[!.]*");
-        } else {
-            mkdir($webRoot, 0755, true);
-        }
-
-        $zipFile = Config::TEMP_DIR . "/$domain-" . time() . ".zip";
-        $ch = curl_init($zipUrl);
-        $fp = fopen($zipFile, 'w');
-        curl_setopt($ch, CURLOPT_FILE, $fp);
-        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 300);
-        $success = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $fileSize = curl_getinfo($ch, CURLINFO_SIZE_DOWNLOAD);
-        curl_close($ch);
-        fclose($fp);
-
-        $downloadSuccess = ($success && file_exists($zipFile) && $httpCode == 200 && $fileSize > 0);
-
-        if (!$downloadSuccess) {
-            Logger::log("Download failed: $domain");
-            self::handleFailedDeployment($webRoot, $backupDir, $hasBackup, $domain, $user, $redirectsData, $zipFile);
-            return;
-        }
-
-        $zip = new ZipArchive;
-        $extractionSuccess = false;
-        $openResult = $zip->open($zipFile);
-
-        if ($openResult === TRUE) {
-            $zipEntryCount = $zip->numFiles;
-
-            if ($zipEntryCount > 0) {
-                $extractResult = $zip->extractTo($webRoot);
-                $zip->close();
-
-                if ($extractResult) {
-                    $extractedFiles = scandir($webRoot);
-                    $extractedFileCount = count($extractedFiles) - 2;
-
-                    if ($extractedFileCount > 0) {
-                        if (file_exists("$webRoot/index.html") || file_exists("$webRoot/index.php")) {
-                            $extractionSuccess = true;
-                            Logger::log("Extraction successful: $domain");
-
-                            self::replaceDomainPlaceholder($webRoot, $domain);
-
-                            // Создаем config.php с оригинальным доменом
-                            self::createPhpConfig($webRoot, $originalDomain, $user);
-
-                            if ($gscFileUrl) {
-                                self::downloadGoogleVerificationFile($webRoot, $gscFileUrl);
-                            }
-
-                        } else {
-                            Logger::log("No index file: $domain");
-                            self::restoreOrCreateIndex($webRoot, $backupDir, $hasBackup);
-                        }
-                    } else {
-                        Logger::log("Empty extraction: $domain");
-                        self::restoreBackupOrCreateIndex($webRoot, $backupDir, $hasBackup);
-                    }
-                } else {
-                    Logger::log("Extraction failed: $domain");
-                    self::restoreBackupOrCreateIndex($webRoot, $backupDir, $hasBackup);
-                }
-            } else {
-                Logger::log("Empty ZIP: $domain");
-                $zip->close();
-                self::restoreBackupOrCreateIndex($webRoot, $backupDir, $hasBackup);
-            }
-        } else {
-            Logger::log("ZIP open failed: $domain");
-            self::restoreBackupOrCreateIndex($webRoot, $backupDir, $hasBackup);
-        }
-
-        RedirectsManager::updateRedirects($domain, $user, $redirectsData);
-
-        exec("chown -R $user:$user $webRoot");
-        exec("find $webRoot -type d -exec chmod 755 {} \\;");
-        exec("find $webRoot -type f -exec chmod 644 {} \\;");
-
-        self::cleanup($zipFile, $backupDir, $hasBackup);
-
-        if ($extractionSuccess) {
-            Logger::log("Deployment successful: $domain");
-        } else {
-            Logger::log("Deployment issues: $domain");
-        }
-    }
-
-    /**
-     * Check if domain has tc-nginx-only proxy template and set it if not
-     */
-    /**
-     * Set tc-nginx-only proxy template for domain
-     */
-    private static function setProxyTemplate($domain, $user)
-    {
-        Logger::log("Setting proxy template tc-nginx-only for domain: $domain");
-
-        $setProxyCmd = "sudo /usr/local/hestia/bin/v-change-web-domain-proxy-tpl $user $domain tc-nginx-only";
-        $result = exec($setProxyCmd, $output, $returnCode);
-
-        if ($returnCode === 0) {
-            Logger::log("Proxy template tc-nginx-only set successfully for: $domain");
-        } else {
-            Logger::log("Failed to set proxy template for: $domain. Error: " . implode("\n", $output));
-        }
-    }
-
-    /**
-     * Handle failed deployment by restoring backup or creating placeholder
-     */
-    private static function handleFailedDeployment($webRoot, $backupDir, $hasBackup, $domain, $user, $redirectsData, $zipFile)
-    {
-        if ($hasBackup) {
-            exec("cp -r $backupDir/* $webRoot/ 2>/dev/null");
-            exec("cp -r $backupDir/.[!.]* $webRoot/ 2>/dev/null");
-            Logger::log("Restored backup: $domain");
-        } else {
-            file_put_contents("$webRoot/index.html", "<html><body><h1>Site is being updated</h1><p>Please check back later.</p></body></html>");
-        }
-
-        RedirectsManager::updateRedirects($domain, $user, $redirectsData);
-        exec("chown -R $user:$user $webRoot");
-
-        self::cleanup($zipFile, $backupDir, $hasBackup);
-    }
-
-    /**
-     * Restore index file from backup or create new one
-     */
-    private static function restoreOrCreateIndex($webRoot, $backupDir, $hasBackup)
-    {
-        if ($hasBackup) {
-            if (file_exists("$backupDir/index.html")) {
-                copy("$backupDir/index.html", "$webRoot/index.html");
-            } elseif (file_exists("$backupDir/index.php")) {
-                copy("$backupDir/index.php", "$webRoot/index.php");
-            } else {
-                file_put_contents("$webRoot/index.html", "<html><body><h1>Site is being updated</h1><p>Please check back later.</p></body></html>");
-            }
-        } else {
-            file_put_contents("$webRoot/index.html", "<html><body><h1>Site is being updated</h1><p>Please check back later.</p></body></html>");
-        }
-    }
-
-    /**
-     * Restore backup or create placeholder index
-     */
-    private static function restoreBackupOrCreateIndex($webRoot, $backupDir, $hasBackup)
-    {
-        if ($hasBackup) {
-            exec("cp -r $backupDir/* $webRoot/ 2>/dev/null");
-            exec("cp -r $backupDir/.[!.]* $webRoot/ 2>/dev/null");
-        } else {
-            file_put_contents("$webRoot/index.html", "<html><body><h1>Site is being updated</h1><p>Please check back later.</p></body></html>");
-        }
-    }
-
-    /**
-     * Cleanup temporary files and directories
-     */
-    private static function cleanup($zipFile, $backupDir, $hasBackup)
-    {
-        if (file_exists($zipFile)) {
-            unlink($zipFile);
-        }
-        if ($hasBackup) {
-            exec("rm -rf $backupDir");
-        }
+        $placeholder = "<html><body><h1>Site is being updated</h1><p>Please check back later.</p></body></html>";
+        file_put_contents("$webRoot/index.html", $placeholder);
+        exec("chown $user:$user $webRoot/index.html");
+        Logger::log("Created placeholder page");
     }
 }
