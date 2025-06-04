@@ -264,12 +264,18 @@ class DomainManager
         $webConfFile = "/usr/local/hestia/data/users/$user/web.conf";
 
         if (file_exists($webConfFile)) {
-            $currentDate = date("Y-m-d H:i:s");
+            // Проверяем, есть ли уже запись для этого домена
+            $webConfContent = file_get_contents($webConfFile);
+            if (strpos($webConfContent, "WEB_DOMAIN='$domain'") === false) {
+                $currentDate = date("Y-m-d H:i:s");
 
-            $domainEntry = "WEB_DOMAIN='$domain' IP='$ip' IP6='' WEB_TPL='default' BACKEND='php-fpm' PROXY='$proxyTemplate' PROXY_EXT='html,htm,php' SSL='$ssl' SSL_HOME='same' STATS='' STATS_AUTH='' STATS_USER='' U_DISK='0' U_BANDWIDTH='0' SUSPENDED='no' TIME='$currentDate' DATE='$currentDate'\n";
+                $domainEntry = "WEB_DOMAIN='$domain' IP='$ip' IP6='' WEB_TPL='default' BACKEND='php-fpm' PROXY='$proxyTemplate' PROXY_EXT='html,htm,php' SSL='$ssl' SSL_HOME='same' STATS='' STATS_AUTH='' STATS_USER='' U_DISK='0' U_BANDWIDTH='0' SUSPENDED='no' TIME='$currentDate' DATE='$currentDate'\n";
 
-            file_put_contents($webConfFile, $domainEntry, FILE_APPEND);
-            Logger::log("Manually added domain entry to web.conf");
+                file_put_contents($webConfFile, $domainEntry, FILE_APPEND);
+                Logger::log("Manually added domain entry to web.conf");
+            } else {
+                Logger::log("Domain entry already exists in web.conf, skipping");
+            }
 
             $confDir = "/home/$user/conf/web/$domain";
             if (!is_dir($confDir)) {
@@ -322,7 +328,19 @@ class DomainManager
         foreach ($webConfigs as $configFile) {
             if (!empty($configFile) && file_exists($configFile)) {
                 $escapedConfigFile = escapeshellarg($configFile);
-                exec("grep -v $escapedDomain $escapedConfigFile > $escapedConfigFile.tmp && mv $escapedConfigFile.tmp $escapedConfigFile");
+
+                // Читаем файл и удаляем все строки с доменом
+                $content = file_get_contents($configFile);
+                $lines = explode("\n", $content);
+                $cleanedLines = [];
+
+                foreach ($lines as $line) {
+                    if (strpos($line, "WEB_DOMAIN='$domain'") === false) {
+                        $cleanedLines[] = $line;
+                    }
+                }
+
+                file_put_contents($configFile, implode("\n", $cleanedLines));
                 Logger::log("Cleaned domain from config: $configFile");
             }
         }
