@@ -15,14 +15,18 @@ class DomainManager
             $domain = substr($domain, 4);
         }
 
-        exec("/usr/local/hestia/bin/v-list-web-domain $user $domain 2>/dev/null", $output, $returnVar);
+        // Экранируем параметры
+        $escapedUser = escapeshellarg($user);
+        $escapedDomain = escapeshellarg($domain);
+
+        exec("/usr/local/hestia/bin/v-list-web-domain $escapedUser $escapedDomain 2>/dev/null", $output, $returnVar);
         if ($returnVar === 0) {
             Logger::log("Domain already exists for user $user: $domain");
             return $domain;
         }
 
         Logger::log("Checking for domain ownership: $domain");
-        exec("/usr/local/hestia/bin/v-search-domain-owner $domain 2>/dev/null", $output, $returnVar);
+        exec("/usr/local/hestia/bin/v-search-domain-owner $escapedDomain 2>/dev/null", $output, $returnVar);
 
         if ($returnVar === 0 && !empty($output)) {
             $existingUser = trim(implode("\n", $output));
@@ -40,12 +44,12 @@ class DomainManager
 
         Logger::log("Adding domain to user $user: $domain");
         $output = [];
-        exec("/usr/local/hestia/bin/v-add-web-domain $user $domain 2>&1", $output, $returnVar);
+        exec("/usr/local/hestia/bin/v-add-web-domain $escapedUser $escapedDomain 2>&1", $output, $returnVar);
 
         if ($returnVar === 0) {
             Logger::log("Domain created successfully: $domain");
 
-            exec("/usr/local/hestia/bin/v-change-web-domain-proxy-tpl $user $domain tc-nginx-only", $output, $returnVar);
+            exec("/usr/local/hestia/bin/v-change-web-domain-proxy-tpl $escapedUser $escapedDomain tc-nginx-only", $output, $returnVar);
             if ($returnVar !== 0) {
                 Logger::log("Warning: Failed to apply proxy template for $domain");
             }
@@ -56,7 +60,7 @@ class DomainManager
         Logger::log("Standard domain creation failed: " . implode("\n", $output));
 
         Logger::log("Trying alternative domain creation method");
-        exec("/usr/local/hestia/bin/v-add-web-domain $user $domain 'default' 'no' '' '' '' '' '' '' 'tc-nginx-only' 2>&1", $outputAlt, $returnVarAlt);
+        exec("/usr/local/hestia/bin/v-add-web-domain $escapedUser $escapedDomain 'default' 'no' '' '' '' '' '' '' 'tc-nginx-only' 2>&1", $outputAlt, $returnVarAlt);
 
         if ($returnVarAlt === 0) {
             Logger::log("Alternative domain creation successful");
@@ -78,13 +82,18 @@ class DomainManager
     {
         Logger::log("Transferring domain $domain from $currentUser to $targetUser");
 
+        // Экранируем все параметры
+        $escapedDomain = escapeshellarg($domain);
+        $escapedCurrentUser = escapeshellarg($currentUser);
+        $escapedTargetUser = escapeshellarg($targetUser);
+
         $timestamp = time();
         $tempDir = "/tmp/domain_transfer_$timestamp";
         mkdir($tempDir, 0755, true);
 
         $webRoot = "/home/$currentUser/web/$domain/public_html";
         if (is_dir($webRoot)) {
-            exec("cp -a $webRoot $tempDir/public_html");
+            exec("cp -a " . escapeshellarg($webRoot) . " " . escapeshellarg("$tempDir/public_html"));
             Logger::log("Content copied to temporary directory");
         } else {
             mkdir("$tempDir/public_html", 0755, true);
@@ -94,7 +103,7 @@ class DomainManager
         $proxyTemplate = 'tc-nginx-only';
         $ssl = 'no';
 
-        exec("/usr/local/hestia/bin/v-list-web-domain $currentUser $domain json", $domainInfo, $returnVar);
+        exec("/usr/local/hestia/bin/v-list-web-domain $escapedCurrentUser $escapedDomain json", $domainInfo, $returnVar);
         if ($returnVar === 0) {
             $domainInfoJson = implode("\n", $domainInfo);
             $domainSettings = json_decode($domainInfoJson, true);
@@ -115,21 +124,21 @@ class DomainManager
         $hasSsl = false;
 
         if ($ssl === 'yes' && is_dir($sslDir)) {
-            exec("mkdir -p $tempDir/ssl");
-            exec("cp -a $sslDir/* $tempDir/ssl/ 2>/dev/null");
+            exec("mkdir -p " . escapeshellarg("$tempDir/ssl"));
+            exec("cp -a " . escapeshellarg("$sslDir/*") . " " . escapeshellarg("$tempDir/ssl/") . " 2>/dev/null");
             $hasSsl = true;
             Logger::log("SSL certificates copied");
         }
 
         Logger::log("Suspending domain for current user");
-        exec("/usr/local/hestia/bin/v-suspend-web-domain $currentUser $domain 2>/dev/null");
+        exec("/usr/local/hestia/bin/v-suspend-web-domain $escapedCurrentUser $escapedDomain 2>/dev/null");
         sleep(2);
 
         Logger::log("Deleting domain from current user");
         $deleteCommands = [
-            "/usr/local/hestia/bin/v-delete-web-domain $currentUser $domain --force",
-            "/usr/local/hestia/bin/v-delete-dns-domain $currentUser $domain --force",
-            "/usr/local/hestia/bin/v-delete-mail-domain $currentUser $domain --force"
+            "/usr/local/hestia/bin/v-delete-web-domain $escapedCurrentUser $escapedDomain --force",
+            "/usr/local/hestia/bin/v-delete-dns-domain $escapedCurrentUser $escapedDomain --force",
+            "/usr/local/hestia/bin/v-delete-mail-domain $escapedCurrentUser $escapedDomain --force"
         ];
 
         foreach ($deleteCommands as $cmd) {
@@ -141,18 +150,19 @@ class DomainManager
             sleep(1);
         }
 
-        exec("/usr/local/hestia/bin/v-rebuild-user $currentUser 'yes' 2>/dev/null");
+        exec("/usr/local/hestia/bin/v-rebuild-user $escapedCurrentUser 'yes' 2>/dev/null");
 
         self::cleanupDomainTraces($domain);
 
         Logger::log("Creating domain for target user");
-        exec("/usr/local/hestia/bin/v-add-web-domain $targetUser $domain 2>&1", $output, $returnVar);
+        exec("/usr/local/hestia/bin/v-add-web-domain $escapedTargetUser $escapedDomain 2>&1", $output, $returnVar);
 
         if ($returnVar !== 0) {
             Logger::log("Standard domain creation failed: " . implode("\n", $output));
 
             Logger::log("Trying alternative domain creation method");
-            exec("/usr/local/hestia/bin/v-add-web-domain $targetUser $domain 'default' 'no' '' '' '' '' '' '' '$proxyTemplate' 2>&1", $outputAlt, $returnVarAlt);
+            $escapedProxyTemplate = escapeshellarg($proxyTemplate);
+            exec("/usr/local/hestia/bin/v-add-web-domain $escapedTargetUser $escapedDomain 'default' 'no' '' '' '' '' '' '' $escapedProxyTemplate 2>&1", $outputAlt, $returnVarAlt);
 
             if ($returnVarAlt !== 0) {
                 Logger::log("Alternative method failed: " . implode("\n", $outputAlt));
@@ -161,33 +171,36 @@ class DomainManager
             }
         }
 
-        exec("/usr/local/hestia/bin/v-list-web-domain $targetUser $domain 2>/dev/null", $checkOutput, $checkReturnVar);
+        exec("/usr/local/hestia/bin/v-list-web-domain $escapedTargetUser $escapedDomain 2>/dev/null", $checkOutput, $checkReturnVar);
         if ($checkReturnVar !== 0) {
             Logger::log("ERROR: Domain not created for target user after all attempts");
-            exec("rm -rf $tempDir");
+            exec("rm -rf " . escapeshellarg($tempDir));
             return $domain;
         }
 
         Logger::log("Domain successfully created for target user");
 
         $newWebRoot = "/home/$targetUser/web/$domain/public_html";
+        $escapedNewWebRoot = escapeshellarg($newWebRoot);
 
-        exec("rm -rf $newWebRoot/* 2>/dev/null");
-        exec("rm -rf $newWebRoot/.[!.]* 2>/dev/null");
+        exec("rm -rf $escapedNewWebRoot/* 2>/dev/null");
+        exec("rm -rf $escapedNewWebRoot/.[!.]* 2>/dev/null");
 
         if (is_dir("$tempDir/public_html")) {
             Logger::log("Restoring website content");
-            exec("cp -a $tempDir/public_html/* $newWebRoot/ 2>/dev/null");
-            exec("cp -a $tempDir/public_html/.[!.]* $newWebRoot/ 2>/dev/null");
+            exec("cp -a " . escapeshellarg("$tempDir/public_html/*") . " $escapedNewWebRoot/ 2>/dev/null");
+            exec("cp -a " . escapeshellarg("$tempDir/public_html/.[!.]*") . " $escapedNewWebRoot/ 2>/dev/null");
         }
 
-        exec("chown -R $targetUser:$targetUser /home/$targetUser/web/$domain");
-        exec("find $newWebRoot -type d -exec chmod 755 {} \\;");
-        exec("find $newWebRoot -type f -exec chmod 644 {} \\;");
+        $escapedWebDomainPath = escapeshellarg("/home/$targetUser/web/$domain");
+        exec("chown -R $escapedTargetUser:$escapedTargetUser $escapedWebDomainPath");
+        exec("find $escapedNewWebRoot -type d -exec chmod 755 {} \\;");
+        exec("find $escapedNewWebRoot -type f -exec chmod 644 {} \\;");
 
         if (!empty($proxyTemplate)) {
             Logger::log("Setting proxy template: $proxyTemplate");
-            exec("/usr/local/hestia/bin/v-change-web-domain-proxy-tpl $targetUser $domain $proxyTemplate 2>&1", $output, $returnVar);
+            $escapedProxyTemplate = escapeshellarg($proxyTemplate);
+            exec("/usr/local/hestia/bin/v-change-web-domain-proxy-tpl $escapedTargetUser $escapedDomain $escapedProxyTemplate 2>&1", $output, $returnVar);
             if ($returnVar !== 0) {
                 Logger::log("Warning: Failed to set proxy template: " . implode("\n", $output));
             }
@@ -199,20 +212,21 @@ class DomainManager
                 mkdir($newSslDir, 0755, true);
             }
 
-            exec("cp -a $tempDir/ssl/* $newSslDir/ 2>/dev/null");
-            exec("chown -R $targetUser:$targetUser $newSslDir");
+            $escapedNewSslDir = escapeshellarg($newSslDir);
+            exec("cp -a " . escapeshellarg("$tempDir/ssl/*") . " $escapedNewSslDir/ 2>/dev/null");
+            exec("chown -R $escapedTargetUser:$escapedTargetUser $escapedNewSslDir");
 
             Logger::log("Enabling SSL for domain");
-            exec("/usr/local/hestia/bin/v-add-web-domain-ssl $targetUser $domain 2>&1", $output, $returnVar);
+            exec("/usr/local/hestia/bin/v-add-web-domain-ssl $escapedTargetUser $escapedDomain 2>&1", $output, $returnVar);
 
             if ($returnVar !== 0) {
                 Logger::log("Warning: Failed to enable SSL: " . implode("\n", $output));
             }
         }
 
-        exec("rm -rf $tempDir");
+        exec("rm -rf " . escapeshellarg($tempDir));
 
-        exec("/usr/local/hestia/bin/v-rebuild-web-domains $targetUser 2>&1", $output, $returnVar);
+        exec("/usr/local/hestia/bin/v-rebuild-web-domains $escapedTargetUser 2>&1", $output, $returnVar);
 
         Logger::log("Domain transfer completed: $domain");
         return $domain;
@@ -236,7 +250,9 @@ class DomainManager
             mkdir($publicHtml, 0755, true);
         }
 
-        exec("chown -R $user:$user $webRoot");
+        $escapedUser = escapeshellarg($user);
+        $escapedWebRoot = escapeshellarg($webRoot);
+        exec("chown -R $escapedUser:$escapedUser $escapedWebRoot");
 
         exec("hostname -I | awk '{print $1}'", $ipAddress);
         $ip = trim($ipAddress[0] ?? '');
@@ -258,12 +274,13 @@ class DomainManager
             $confDir = "/home/$user/conf/web/$domain";
             if (!is_dir($confDir)) {
                 mkdir($confDir, 0755, true);
-                exec("chown $user:$user $confDir");
+                exec("chown $escapedUser:$escapedUser " . escapeshellarg($confDir));
             }
 
-            exec("/usr/local/hestia/bin/v-rebuild-web-domains $user");
+            exec("/usr/local/hestia/bin/v-rebuild-web-domains $escapedUser");
 
-            exec("/usr/local/hestia/bin/v-list-web-domain $user $domain 2>/dev/null", $output, $returnVar);
+            $escapedDomain = escapeshellarg($domain);
+            exec("/usr/local/hestia/bin/v-list-web-domain $escapedUser $escapedDomain 2>/dev/null", $output, $returnVar);
 
             if ($returnVar === 0) {
                 Logger::log("Low-level domain addition successful");
@@ -275,7 +292,7 @@ class DomainManager
                 exec("/usr/local/hestia/bin/v-restart-service 'apache2'");
                 exec("/usr/local/hestia/bin/v-restart-service 'hestia'");
 
-                exec("/usr/local/hestia/bin/v-rebuild-user $user 'yes'");
+                exec("/usr/local/hestia/bin/v-rebuild-user $escapedUser 'yes'");
             }
         } else {
             Logger::log("Error: web.conf not found for user $user");
@@ -291,42 +308,57 @@ class DomainManager
     {
         Logger::log("Cleaning up all traces of domain: $domain");
 
-        exec("find /home -name '$domain' -type d 2>/dev/null", $domainDirs);
-        foreach ($domainDirs as $dir) {
-            exec("rm -rf '$dir'");
-            Logger::log("Removed directory: $dir");
-        }
-
         $escapedDomain = escapeshellarg($domain);
+
+        exec("find /home -name $escapedDomain -type d 2>/dev/null", $domainDirs);
+        foreach ($domainDirs as $dir) {
+            if (!empty($dir)) {
+                exec("rm -rf " . escapeshellarg($dir));
+                Logger::log("Removed directory: $dir");
+            }
+        }
 
         exec("find /usr/local/hestia/data/users/*/web.conf -type f -exec grep -l $escapedDomain {} \\;", $webConfigs);
         foreach ($webConfigs as $configFile) {
-            exec("grep -v $escapedDomain $configFile > $configFile.tmp && mv $configFile.tmp $configFile");
-            Logger::log("Cleaned domain from config: $configFile");
+            if (!empty($configFile) && file_exists($configFile)) {
+                $escapedConfigFile = escapeshellarg($configFile);
+                exec("grep -v $escapedDomain $escapedConfigFile > $escapedConfigFile.tmp && mv $escapedConfigFile.tmp $escapedConfigFile");
+                Logger::log("Cleaned domain from config: $configFile");
+            }
         }
 
         exec("find /usr/local/hestia/data/users/*/dns.conf -type f -exec grep -l $escapedDomain {} \\;", $dnsConfigs);
         foreach ($dnsConfigs as $configFile) {
-            exec("grep -v $escapedDomain $configFile > $configFile.tmp && mv $configFile.tmp $configFile");
-            Logger::log("Cleaned domain from config: $configFile");
+            if (!empty($configFile) && file_exists($configFile)) {
+                $escapedConfigFile = escapeshellarg($configFile);
+                exec("grep -v $escapedDomain $escapedConfigFile > $escapedConfigFile.tmp && mv $escapedConfigFile.tmp $escapedConfigFile");
+                Logger::log("Cleaned domain from config: $configFile");
+            }
         }
 
         exec("find /usr/local/hestia/data/users/*/mail.conf -type f -exec grep -l $escapedDomain {} \\;", $mailConfigs);
         foreach ($mailConfigs as $configFile) {
-            exec("grep -v $escapedDomain $configFile > $configFile.tmp && mv $configFile.tmp $configFile");
-            Logger::log("Cleaned domain from config: $configFile");
+            if (!empty($configFile) && file_exists($configFile)) {
+                $escapedConfigFile = escapeshellarg($configFile);
+                exec("grep -v $escapedDomain $escapedConfigFile > $escapedConfigFile.tmp && mv $escapedConfigFile.tmp $escapedConfigFile");
+                Logger::log("Cleaned domain from config: $configFile");
+            }
         }
 
         exec("find /etc/nginx/conf.d -name '*$domain*' -type f 2>/dev/null", $nginxConfigs);
         foreach ($nginxConfigs as $config) {
-            exec("rm -f '$config'");
-            Logger::log("Removed nginx config: $config");
+            if (!empty($config)) {
+                exec("rm -f " . escapeshellarg($config));
+                Logger::log("Removed nginx config: $config");
+            }
         }
 
         exec("find /etc/apache2/sites-enabled -name '*$domain*' -type f 2>/dev/null", $apacheConfigs);
         foreach ($apacheConfigs as $config) {
-            exec("rm -f '$config'");
-            Logger::log("Removed apache config: $config");
+            if (!empty($config)) {
+                exec("rm -f " . escapeshellarg($config));
+                Logger::log("Removed apache config: $config");
+            }
         }
 
         exec("/usr/local/hestia/bin/v-restart-service 'nginx' 'quiet'");
