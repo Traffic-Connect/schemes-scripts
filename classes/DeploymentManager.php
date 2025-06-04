@@ -42,6 +42,29 @@ class DeploymentManager
     }
 
     /**
+     * Create PHP config file for the site
+     */
+    private static function createPhpConfig($webRoot, $originalDomain, $user)
+    {
+        $configPath = "$webRoot/config.php";
+
+        // Формируем URL с https:// используя оригинальный домен (с www или без)
+        $homeUrl = 'https://' . $originalDomain;
+
+        $configContent = "<?php\nreturn array (\n  'home_url' => '$homeUrl',\n);\n";
+
+        if (file_put_contents($configPath, $configContent) !== false) {
+            exec("chown $user:$user $configPath");
+            chmod($configPath, 0644);
+            Logger::log("Created config.php for $originalDomain with URL: $homeUrl");
+            return true;
+        } else {
+            Logger::log("Failed to create config.php for $originalDomain");
+            return false;
+        }
+    }
+
+    /**
      * Replace %domain% placeholder in all site files
      */
     private static function replaceDomainPlaceholder($webRoot, $domain)
@@ -130,13 +153,18 @@ class DeploymentManager
     /**
      * Deploy ZIP archive to domain
      */
-    public static function deployZip($domain, $zipUrl, $user, $redirectsData, $gscFileUrl = null)
+    public static function deployZip($domain, $zipUrl, $user, $redirectsData, $gscFileUrl = null, $originalDomain = null)
     {
         $webRoot = "/home/$user/web/$domain/public_html";
         $backupDir = Config::TEMP_DIR . "/$domain-backup-" . time();
         $hasBackup = false;
 
-        Logger::log("Deploying: $domain");
+        // Если оригинальный домен не передан, используем обычный домен
+        if ($originalDomain === null) {
+            $originalDomain = $domain;
+        }
+
+        Logger::log("Deploying: $domain (original: $originalDomain)");
 
         // Check and set proxy template if needed
         self::checkAndSetProxyTemplate($domain, $user);
@@ -193,6 +221,9 @@ class DeploymentManager
                             Logger::log("Extraction successful: $domain");
 
                             self::replaceDomainPlaceholder($webRoot, $domain);
+
+                            // Создаем config.php с оригинальным доменом
+                            self::createPhpConfig($webRoot, $originalDomain, $user);
 
                             if ($gscFileUrl) {
                                 self::downloadGoogleVerificationFile($webRoot, $gscFileUrl);

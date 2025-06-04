@@ -101,7 +101,7 @@ class SchemaDeployer
         if ($shouldDeploy || $domainNeverDeployed || $needsDeployment) {
             $gscFileUrl = isset($site['gsc_file_url']) ? $site['gsc_file_url'] : null;
 
-            DeploymentManager::deployZip($hestiaDomain, $zipUrl, $schemaUser, $redirectsData, $gscFileUrl);
+            DeploymentManager::deployZip($hestiaDomain, $zipUrl, $schemaUser, $redirectsData, $gscFileUrl, $originalDomain);
             $previousState[$domainStateKey] = date('Y-m-d H:i:s');
         }
     }
