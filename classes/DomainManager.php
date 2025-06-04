@@ -1,47 +1,45 @@
 <?php
 
-require_once __DIR__ . '/Logger.php';
-
-class SimpleDomainTransfer
+class DomainManager
 {
     /**
-     * Transfer domain to target user
+     * Create domain or transfer if exists, always set tc-nginx-only
      */
-    public static function transferDomain($domain, $targetUser)
+    public static function createDomain($domain, $user)
     {
-        Logger::log("Starting domain transfer: $domain to $targetUser");
-
-        // Находим текущего владельца
-        $currentUser = self::findDomainOwner($domain);
-        if (!$currentUser) {
-            Logger::log("Domain owner not found: $domain");
-            return false;
+        // Убираем www если есть
+        $originalDomain = $domain;
+        if (strpos($domain, 'www.') === 0) {
+            $domain = substr($domain, 4);
         }
 
-        if ($currentUser === $targetUser) {
-            Logger::log("Domain already belongs to target user");
-            return true;
+        $escapedUser = escapeshellarg($user);
+        $escapedDomain = escapeshellarg($domain);
+
+        // Проверяем есть ли домен у нашего пользователя
+        exec("/usr/local/hestia/bin/v-list-web-domain $escapedUser $escapedDomain 2>/dev/null", $output, $returnVar);
+        if ($returnVar === 0) {
+            Logger::log("Domain already exists for user $user: $domain");
+            // Устанавливаем proxy template на всякий случай
+            self::setProxyTemplate($domain, $user);
+            return $domain;
         }
 
-        Logger::log("Found domain owner: $currentUser");
+        // Ищем владельца домена
+        $currentOwner = self::findDomainOwner($domain);
 
-        // Создаем бэкап контента
-        $backupDir = self::backupDomainContent($domain, $currentUser);
-
-        // Удаляем домен у старого пользователя
-        self::deleteDomain($domain, $currentUser);
-
-        // Создаем домен у нового пользователя
-        self::createDomain($domain, $targetUser);
-
-        // Восстанавливаем контент
-        if ($backupDir) {
-            self::restoreContent($domain, $targetUser, $backupDir);
-            self::cleanup($backupDir);
+        if ($currentOwner && $currentOwner !== $user) {
+            Logger::log("Domain exists with owner: $currentOwner, transferring to $user");
+            self::transferDomain($domain, $currentOwner, $user);
+        } else {
+            Logger::log("Domain does not exist, creating new: $domain");
+            self::createNewDomain($domain, $user);
         }
 
-        Logger::log("Domain transfer completed: $domain");
-        return true;
+        // Обязательно устанавливаем proxy template
+        self::setProxyTemplate($domain, $user);
+
+        return $domain;
     }
 
     /**
@@ -64,64 +62,71 @@ class SimpleDomainTransfer
     }
 
     /**
-     * Backup domain content
+     * Transfer domain from one user to another
      */
-    private static function backupDomainContent($domain, $currentUser)
+    private static function transferDomain($domain, $fromUser, $toUser)
     {
-        $webRoot = "/home/$currentUser/web/$domain/public_html";
+        Logger::log("Transferring $domain from $fromUser to $toUser");
 
-        if (!is_dir($webRoot)) {
-            return null;
-        }
+        $escapedFromUser = escapeshellarg($fromUser);
+        $escapedToUser = escapeshellarg($toUser);
+        $escapedDomain = escapeshellarg($domain);
 
-        $backupDir = "/tmp/domain_backup_" . time();
+        // Бэкапим контент
+        $backupDir = "/tmp/transfer_" . time();
         mkdir($backupDir, 0755, true);
 
-        exec("cp -a " . escapeshellarg($webRoot) . " " . escapeshellarg("$backupDir/public_html"));
-        Logger::log("Content backed up to: $backupDir");
+        $oldWebRoot = "/home/$fromUser/web/$domain/public_html";
+        if (is_dir($oldWebRoot)) {
+            exec("cp -a " . escapeshellarg($oldWebRoot) . " " . escapeshellarg("$backupDir/public_html"));
+            Logger::log("Content backed up");
+        }
 
-        return $backupDir;
+        // Удаляем у старого пользователя
+        exec("/usr/local/hestia/bin/v-delete-web-domain $escapedFromUser $escapedDomain --force 2>/dev/null");
+        sleep(1);
+
+        // Создаем у нового пользователя
+        exec("/usr/local/hestia/bin/v-add-web-domain $escapedToUser $escapedDomain 2>&1", $output, $returnVar);
+
+        if ($returnVar !== 0) {
+            Logger::log("Standard creation failed, using manual method");
+            self::createDomainManually($domain, $toUser);
+        }
+
+        // Восстанавливаем контент
+        $newWebRoot = "/home/$toUser/web/$domain/public_html";
+        if (is_dir("$backupDir/public_html") && is_dir($newWebRoot)) {
+            exec("rm -rf " . escapeshellarg("$newWebRoot/*") . " 2>/dev/null");
+            exec("cp -a " . escapeshellarg("$backupDir/public_html/*") . " " . escapeshellarg($newWebRoot) . "/ 2>/dev/null");
+            exec("chown -R $escapedToUser:$escapedToUser " . escapeshellarg($newWebRoot));
+            Logger::log("Content restored");
+        }
+
+        // Убираем бэкап
+        exec("rm -rf " . escapeshellarg($backupDir));
+
+        Logger::log("Domain transfer completed: $domain");
     }
 
     /**
-     * Delete domain from user
+     * Create new domain
      */
-    private static function deleteDomain($domain, $user)
+    private static function createNewDomain($domain, $user)
     {
         $escapedUser = escapeshellarg($user);
         $escapedDomain = escapeshellarg($domain);
-
-        Logger::log("Deleting domain $domain from user $user");
-
-        exec("/usr/local/hestia/bin/v-delete-web-domain $escapedUser $escapedDomain --force 2>/dev/null");
-        exec("/usr/local/hestia/bin/v-delete-dns-domain $escapedUser $escapedDomain --force 2>/dev/null");
-        exec("/usr/local/hestia/bin/v-delete-mail-domain $escapedUser $escapedDomain --force 2>/dev/null");
-
-        sleep(2);
-    }
-
-    /**
-     * Create domain for user
-     */
-    private static function createDomain($domain, $user)
-    {
-        $escapedUser = escapeshellarg($user);
-        $escapedDomain = escapeshellarg($domain);
-
-        Logger::log("Creating domain $domain for user $user");
 
         // Пробуем создать стандартным способом
         exec("/usr/local/hestia/bin/v-add-web-domain $escapedUser $escapedDomain 2>&1", $output, $returnVar);
 
         if ($returnVar === 0) {
-            Logger::log("Domain created successfully");
-            // Устанавливаем proxy template
-            exec("/usr/local/hestia/bin/v-change-web-domain-proxy-tpl $escapedUser $escapedDomain tc-nginx-only 2>/dev/null");
-            return true;
+            Logger::log("Domain created successfully: $domain");
+            return;
         }
 
         Logger::log("Standard creation failed, using manual method");
-        return self::createDomainManually($domain, $user);
+        self::createDomainManually($domain, $user);
     }
 
     /**
@@ -129,6 +134,8 @@ class SimpleDomainTransfer
      */
     private static function createDomainManually($domain, $user)
     {
+        Logger::log("Creating domain manually: $domain for $user");
+
         // Создаем папки
         $webRoot = "/home/$user/web/$domain";
         $directories = [
@@ -169,46 +176,25 @@ class SimpleDomainTransfer
         // Перестраиваем конфиги
         exec("/usr/local/hestia/bin/v-rebuild-web-domains $escapedUser 2>/dev/null");
 
-        Logger::log("Domain created manually");
-        return true;
+        Logger::log("Domain created manually: $domain");
     }
 
     /**
-     * Restore content
+     * Set tc-nginx-only proxy template
      */
-    private static function restoreContent($domain, $user, $backupDir)
+    private static function setProxyTemplate($domain, $user)
     {
-        $webRoot = "/home/$user/web/$domain/public_html";
+        $escapedUser = escapeshellarg($user);
+        $escapedDomain = escapeshellarg($domain);
 
-        if (is_dir("$backupDir/public_html") && is_dir($webRoot)) {
-            Logger::log("Restoring content");
+        Logger::log("Setting tc-nginx-only proxy template for: $domain");
 
-            // Очищаем папку
-            exec("rm -rf " . escapeshellarg("$webRoot/*") . " 2>/dev/null");
-            exec("rm -rf " . escapeshellarg("$webRoot/.[!.]*") . " 2>/dev/null");
+        exec("/usr/local/hestia/bin/v-change-web-domain-proxy-tpl $escapedUser $escapedDomain tc-nginx-only 2>&1", $output, $returnVar);
 
-            // Копируем контент
-            exec("cp -a " . escapeshellarg("$backupDir/public_html/*") . " " . escapeshellarg($webRoot) . "/ 2>/dev/null");
-            exec("cp -a " . escapeshellarg("$backupDir/public_html/.[!.]*") . " " . escapeshellarg($webRoot) . "/ 2>/dev/null");
-
-            // Устанавливаем права
-            $escapedUser = escapeshellarg($user);
-            $escapedWebRoot = escapeshellarg($webRoot);
-            exec("chown -R $escapedUser:$escapedUser $escapedWebRoot");
-
-            Logger::log("Content restored");
-        }
-    }
-
-    /**
-     * Cleanup backup
-     */
-    private static function cleanup($backupDir)
-    {
-        if ($backupDir && is_dir($backupDir)) {
-            exec("rm -rf " . escapeshellarg($backupDir));
-            Logger::log("Cleanup completed");
+        if ($returnVar === 0) {
+            Logger::log("Proxy template set successfully for: $domain");
+        } else {
+            Logger::log("Warning: Failed to set proxy template for: $domain");
         }
     }
 }
-
