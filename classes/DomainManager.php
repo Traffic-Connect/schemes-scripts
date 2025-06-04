@@ -151,32 +151,27 @@ class DomainManager
             }
         }
 
-        // Получаем IP
-        exec("hostname -I | awk '{print $1}'", $ipOutput);
-        $ip = trim($ipOutput[0] ?? '127.0.0.1');
-
-        // Добавляем в web.conf
-        $webConfFile = "/usr/local/hestia/data/users/$user/web.conf";
-        if (file_exists($webConfFile)) {
-            $content = file_get_contents($webConfFile);
-            if (strpos($content, "WEB_DOMAIN='$domain'") === false) {
-                $date = date("Y-m-d H:i:s");
-                $entry = "WEB_DOMAIN='$domain' IP='$ip' IP6='' WEB_TPL='default' BACKEND='php-fpm' PROXY='tc-nginx-only' PROXY_EXT='html,htm,php' SSL='no' SSL_HOME='same' STATS='' STATS_AUTH='' STATS_USER='' U_DISK='0' U_BANDWIDTH='0' SUSPENDED='no' TIME='$date' DATE='$date'\n";
-
-                file_put_contents($webConfFile, $entry, FILE_APPEND);
-                Logger::log("Added domain to web.conf");
-            }
-        }
-
         // Устанавливаем права
         $escapedUser = escapeshellarg($user);
         $escapedWebRoot = escapeshellarg($webRoot);
         exec("chown -R $escapedUser:$escapedUser $escapedWebRoot");
 
-        // Перестраиваем конфиги
-        exec("/usr/local/hestia/bin/v-rebuild-web-domains $escapedUser 2>/dev/null");
+        // НЕ добавляем записи в web.conf вручную!
+        // Пробуем пересоздать домен через Hestia
+        $escapedDomain = escapeshellarg($domain);
 
-        Logger::log("Domain created manually: $domain");
+        // Пробуем альтернативный метод создания
+        exec("/usr/local/hestia/bin/v-add-web-domain $escapedUser $escapedDomain 'default' 'no' '' '' '' '' '' '' 'tc-nginx-only' 2>&1", $output, $returnVar);
+
+        if ($returnVar === 0) {
+            Logger::log("Alternative domain creation successful: $domain");
+        } else {
+            Logger::log("Alternative creation also failed: " . implode("\n", $output));
+            // Перестраиваем пользователя полностью
+            exec("/usr/local/hestia/bin/v-rebuild-user $escapedUser 'yes' 2>/dev/null");
+        }
+
+        Logger::log("Domain creation completed: $domain");
     }
 
     /**
@@ -189,12 +184,44 @@ class DomainManager
 
         Logger::log("Setting tc-nginx-only proxy template for: $domain");
 
+        // Сначала чистим дублированные записи в web.conf
+        self::cleanWebConf($domain, $user);
+
         exec("/usr/local/hestia/bin/v-change-web-domain-proxy-tpl $escapedUser $escapedDomain tc-nginx-only 2>&1", $output, $returnVar);
 
         if ($returnVar === 0) {
             Logger::log("Proxy template set successfully for: $domain");
         } else {
             Logger::log("Warning: Failed to set proxy template for: $domain");
+            Logger::log("Error output: " . implode("\n", $output));
         }
+    }
+
+    /**
+     * Clean duplicated entries in web.conf
+     */
+    private static function cleanWebConf($domain, $user)
+    {
+        $webConfFile = "/usr/local/hestia/data/users/$user/web.conf";
+
+        if (!file_exists($webConfFile)) {
+            return;
+        }
+
+        $content = file_get_contents($webConfFile);
+        $lines = explode("\n", $content);
+        $cleanedLines = [];
+
+        foreach ($lines as $line) {
+            // Удаляем старые записи с WEB_DOMAIN='domain'
+            if (strpos($line, "WEB_DOMAIN='$domain'") !== false) {
+                Logger::log("Removing duplicate WEB_DOMAIN entry for: $domain");
+                continue;
+            }
+            $cleanedLines[] = $line;
+        }
+
+        file_put_contents($webConfFile, implode("\n", $cleanedLines));
+        Logger::log("Cleaned web.conf for domain: $domain");
     }
 }
