@@ -69,9 +69,6 @@ class SchemaDeployer
     /**
      * Process single site deployment
      */
-    /**
-     * Process single site deployment
-     */
     private static function processSite($site, $currentDomains, $schemaUser, $schemaName, &$previousState, $shouldDeploy, $zipUrl)
     {
         $originalDomain = $site['domain'];
@@ -87,6 +84,9 @@ class SchemaDeployer
         $domainNeverDeployed = empty($previousState[$domainStateKey]);
         $needsDeployment = DeploymentManager::needsDeployment($hestiaDomain, $schemaUser);
 
+        // Новая проверка: нужен ли автоматический деплой для пустого сайта
+        $needsAutomaticDeployment = DeploymentManager::needsAutomaticDeployment($hestiaDomain, $schemaUser);
+
         if ($redirectsChanged) {
             $webRoot = "/home/$schemaUser/web/$hestiaDomain/public_html";
 
@@ -98,11 +98,29 @@ class SchemaDeployer
             RedirectsManager::updateRedirects($hestiaDomain, $schemaUser, $redirectsData);
         }
 
-        if ($shouldDeploy || $domainNeverDeployed || $needsDeployment) {
+        // Определяем нужно ли деплоить
+        $shouldDeployNow = $shouldDeploy || $domainNeverDeployed || $needsDeployment || $needsAutomaticDeployment;
+
+        if ($shouldDeployNow) {
             $gscFileUrl = isset($site['gsc_file_url']) ? $site['gsc_file_url'] : null;
 
-            DeploymentManager::deployZip($hestiaDomain, $zipUrl, $schemaUser, $redirectsData, $gscFileUrl, $originalDomain);
+            // Проверяем причину деплоя для логирования
+            if ($needsAutomaticDeployment) {
+                Logger::log("Triggering automatic deployment for empty site: $hestiaDomain");
+                DeploymentManager::deployZip($hestiaDomain, $zipUrl, $schemaUser, $redirectsData, $gscFileUrl, $originalDomain, true);
+            } else {
+                $reason = [];
+                if ($shouldDeploy) $reason[] = "ZIP updated";
+                if ($domainNeverDeployed) $reason[] = "never deployed";
+                if ($needsDeployment) $reason[] = "missing content";
+
+                Logger::log("Deploying $hestiaDomain. Reason: " . implode(", ", $reason));
+                DeploymentManager::deployZip($hestiaDomain, $zipUrl, $schemaUser, $redirectsData, $gscFileUrl, $originalDomain, false);
+            }
+
             $previousState[$domainStateKey] = date('Y-m-d H:i:s');
+        } else {
+            Logger::log("No deployment needed for: $hestiaDomain");
         }
     }
 
