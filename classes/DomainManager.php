@@ -27,7 +27,13 @@ class DomainManager
         if ($returnVar === 0 && !empty($output)) {
             $existingUser = trim(implode("\n", $output));
 
-            if (!empty($existingUser) && $existingUser !== $user) {
+            // Проверяем, что это действительно имя пользователя, а не сообщение об ошибке
+            if (!empty($existingUser) &&
+                $existingUser !== $user &&
+                !strpos($existingUser, 'Error:') &&
+                !strpos($existingUser, 'doesn\'t exist') &&
+                strlen($existingUser) < 100) { // Имя пользователя не должно быть очень длинным
+
                 Logger::log("Domain exists with different owner: $existingUser");
                 $domain = self::transferDomain($domain, $existingUser, $user);
                 return $domain;
