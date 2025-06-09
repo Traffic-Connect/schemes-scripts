@@ -42,6 +42,37 @@ class DeploymentManager
     }
 
     /**
+     * Check if site is empty and needs automatic deployment
+     * Simple logic: if no index file AND no static directory, deploy
+     */
+    public static function needsAutomaticDeployment($domain, $user)
+    {
+        $webRoot = "/home/$user/web/$domain/public_html";
+
+        if (!is_dir($webRoot)) {
+            Logger::log("Directory doesn't exist, needs automatic deployment: $domain");
+            return true;
+        }
+
+        // Проверяем наличие index файлов
+        $hasIndex = file_exists("$webRoot/index.php") || file_exists("$webRoot/index.html");
+
+        // Проверяем наличие директории static
+        $hasStaticDir = is_dir("$webRoot/static");
+
+        Logger::log("Checking $domain: hasIndex=" . ($hasIndex ? 'yes' : 'no') . ", hasStaticDir=" . ($hasStaticDir ? 'yes' : 'no'));
+
+        // Если нет индекса И нет папки static - нужен автоматический деплой
+        if (!$hasIndex && !$hasStaticDir) {
+            Logger::log("No index file and no static directory, needs automatic deployment: $domain");
+            return true;
+        }
+
+        Logger::log("Site has required content, no automatic deployment needed: $domain");
+        return false;
+    }
+
+    /**
      * Create PHP config file for the site
      */
     private static function createPhpConfig($webRoot, $originalDomain, $user)
@@ -153,7 +184,7 @@ class DeploymentManager
     /**
      * Deploy ZIP archive to domain
      */
-    public static function deployZip($domain, $zipUrl, $user, $redirectsData, $gscFileUrl = null, $originalDomain = null)
+    public static function deployZip($domain, $zipUrl, $user, $redirectsData, $gscFileUrl = null, $originalDomain = null, $isAutomaticDeploy = false)
     {
         $webRoot = "/home/$user/web/$domain/public_html";
         $backupDir = Config::TEMP_DIR . "/$domain-backup-" . time();
@@ -164,14 +195,26 @@ class DeploymentManager
             $originalDomain = $domain;
         }
 
-        Logger::log("Deploying: $domain (original: $originalDomain)");
+        if ($isAutomaticDeploy) {
+            Logger::log("Automatic deployment for empty site: $domain (original: $originalDomain)");
+        } else {
+            Logger::log("Manual deployment: $domain (original: $originalDomain)");
+        }
 
         // Check and set proxy template if needed
         self::checkAndSetProxyTemplate($domain, $user);
 
         if (is_dir($webRoot)) {
-            exec("cp -r $webRoot $backupDir");
-            $hasBackup = is_dir($backupDir);
+            // Создаем бэкап только если это не автоматический деплой или есть важные файлы
+            if (!$isAutomaticDeploy || self::hasImportantContent($webRoot)) {
+                exec("cp -r $webRoot $backupDir");
+                $hasBackup = is_dir($backupDir);
+                if ($hasBackup) {
+                    Logger::log("Backup created: $backupDir");
+                }
+            } else {
+                Logger::log("Skipping backup for automatic deployment of empty site");
+            }
 
             exec("rm -rf $webRoot/*");
             exec("rm -rf $webRoot/.[!.]*");
@@ -218,7 +261,11 @@ class DeploymentManager
                     if ($extractedFileCount > 0) {
                         if (file_exists("$webRoot/index.html") || file_exists("$webRoot/index.php")) {
                             $extractionSuccess = true;
-                            Logger::log("Extraction successful: $domain");
+                            if ($isAutomaticDeploy) {
+                                Logger::log("Automatic deployment extraction successful: $domain");
+                            } else {
+                                Logger::log("Extraction successful: $domain");
+                            }
 
                             self::replaceDomainPlaceholder($webRoot, $domain);
 
@@ -260,10 +307,34 @@ class DeploymentManager
         self::cleanup($zipFile, $backupDir, $hasBackup);
 
         if ($extractionSuccess) {
-            Logger::log("Deployment successful: $domain");
+            if ($isAutomaticDeploy) {
+                Logger::log("Automatic deployment successful: $domain");
+            } else {
+                Logger::log("Deployment successful: $domain");
+            }
         } else {
             Logger::log("Deployment issues: $domain");
         }
+    }
+
+    /**
+     * Check if webroot has important content that should be backed up
+     * Simple logic: if has index file OR static directory, consider important
+     */
+    private static function hasImportantContent($webRoot)
+    {
+        if (!is_dir($webRoot)) {
+            return false;
+        }
+
+        // Проверяем наличие index файлов
+        $hasIndex = file_exists("$webRoot/index.php") || file_exists("$webRoot/index.html");
+
+        // Проверяем наличие директории static
+        $hasStaticDir = is_dir("$webRoot/static");
+
+        // Если есть индекс ИЛИ есть папка static - считаем важным контентом
+        return $hasIndex || $hasStaticDir;
     }
 
     /**

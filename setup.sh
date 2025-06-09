@@ -179,72 +179,6 @@ API_IP2="185.38.219.89"    # Replace with your second IP
 
 setup_api_ips "$API_IP1" "$API_IP2"
 
-# Rebuild web domains configuration if templates were updated
-if [ -f "/usr/local/hestia/data/templates/web/nginx/tc-nginx-only.stpl" ] || [ -f "/usr/local/hestia/data/templates/web/nginx/tc-nginx-only.tpl" ]; then
-    echo "Rebuilding web domain configurations for schemas_* users (excluding _wp suffix)..."
-
-    # Get list of all users
-    USERS=$(ls /usr/local/hestia/data/users/ 2>/dev/null || echo "")
-
-    if [ -n "$USERS" ]; then
-        # Filter users to only process schema* users that do NOT end with _wp
-        SCHEMAS_USERS=$(echo "$USERS" | grep "^schema" | grep -v "_wp$" || echo "")
-
-        if [ -n "$SCHEMAS_USERS" ]; then
-            echo "Found schema users for rebuild (excluding _wp suffix):"
-            echo "$SCHEMAS_USERS"
-            echo ""
-
-            for user in $SCHEMAS_USERS; do
-                if [ -f "/usr/local/hestia/data/users/$user/web.conf" ]; then
-                    echo "Rebuilding web config for schema user: $user"
-
-                    # Read domains for this user
-                    while IFS= read -r line; do
-                        if [[ $line =~ ^DOMAIN=\'([^\']+)\' ]]; then
-                            domain="${BASH_REMATCH[1]}"
-
-                            # Rebuild this domain's nginx config
-                            if command -v v-rebuild-web-domain &> /dev/null; then
-                                echo "  - Rebuilding: $domain"
-                                v-rebuild-web-domain "$user" "$domain" >/dev/null 2>&1
-                                if [ $? -eq 0 ]; then
-                                    echo "  ✓ Rebuilt: $domain"
-                                else
-                                    echo "  ✗ Failed: $domain"
-                                fi
-                            fi
-                        fi
-                    done < "/usr/local/hestia/data/users/$user/web.conf"
-                fi
-            done
-            echo "Web configurations rebuilt for schema users (excluding _wp suffix)"
-        else
-            echo "No schema_* users found (excluding _wp suffix), skipping domain rebuild"
-        fi
-    else
-        echo "No users found, skipping domain rebuild"
-    fi
-
-    # Test nginx configuration
-    echo "Testing nginx configuration..."
-    if nginx -t >/dev/null 2>&1; then
-        echo "Nginx configuration is valid, reloading..."
-        systemctl reload nginx
-        if [ $? -eq 0 ]; then
-            echo "Nginx reloaded successfully"
-        else
-            echo "Warning: Nginx reload failed"
-        fi
-    else
-        echo "Error: Nginx configuration test failed, not reloading"
-        echo "Please check nginx configuration manually:"
-        echo "nginx -t"
-    fi
-else
-    echo "No template changes detected, skipping domain rebuild"
-fi
-
 echo ""
 echo "=== Setup completed successfully ==="
 echo "- Directory: /root/schemas/"
@@ -257,7 +191,6 @@ echo "- Hestia command: v-install-wordpress updated"
 echo "- WP-CLI: $(wp --version --allow-root 2>/dev/null || echo 'installed and configured')"
 echo "- Nginx templates: tc-nginx-only.stpl and tc-nginx-only.tpl"
 echo "- Hestia API: enabled with IP restrictions"
-echo "- Domain configs: rebuilt for schema users only"
 echo ""
 
 # Show API config location for reference
