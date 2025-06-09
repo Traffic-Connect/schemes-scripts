@@ -187,8 +187,6 @@ class DeploymentManager
     public static function deployZip($domain, $zipUrl, $user, $redirectsData, $gscFileUrl = null, $originalDomain = null, $isAutomaticDeploy = false)
     {
         $webRoot = "/home/$user/web/$domain/public_html";
-        $backupDir = Config::TEMP_DIR . "/$domain-backup-" . time();
-        $hasBackup = false;
 
         // Если оригинальный домен не передан, используем обычный домен
         if ($originalDomain === null) {
@@ -204,22 +202,15 @@ class DeploymentManager
         // Check and set proxy template if needed
         self::checkAndSetProxyTemplate($domain, $user);
 
-        if (is_dir($webRoot)) {
-            // Создаем бэкап только если это не автоматический деплой или есть важные файлы
-            if (!$isAutomaticDeploy || self::hasImportantContent($webRoot)) {
-                exec("cp -r $webRoot $backupDir");
-                $hasBackup = is_dir($backupDir);
-                if ($hasBackup) {
-                    Logger::log("Backup created: $backupDir");
-                }
-            } else {
-                Logger::log("Skipping backup for automatic deployment of empty site");
-            }
-
-            exec("rm -rf $webRoot/*");
-            exec("rm -rf $webRoot/.[!.]*");
-        } else {
+        // Создаем директорию если не существует
+        if (!is_dir($webRoot)) {
             mkdir($webRoot, 0755, true);
+        } else {
+            // Очищаем только если это обычный деплой (не автоматический)
+            if (!$isAutomaticDeploy) {
+                exec("rm -rf $webRoot/*");
+                exec("rm -rf $webRoot/.[!.]*");
+            }
         }
 
         $zipFile = Config::TEMP_DIR . "/$domain-" . time() . ".zip";
@@ -239,7 +230,7 @@ class DeploymentManager
 
         if (!$downloadSuccess) {
             Logger::log("Download failed: $domain");
-            self::handleFailedDeployment($webRoot, $backupDir, $hasBackup, $domain, $user, $redirectsData, $zipFile);
+            self::handleFailedDeployment($webRoot, $domain, $user, $redirectsData, $zipFile);
             return;
         }
 
@@ -251,6 +242,12 @@ class DeploymentManager
             $zipEntryCount = $zip->numFiles;
 
             if ($zipEntryCount > 0) {
+                // Для автоматического деплоя - только очищаем если пустой сайт
+                if ($isAutomaticDeploy) {
+                    exec("rm -rf $webRoot/*");
+                    exec("rm -rf $webRoot/.[!.]*");
+                }
+
                 $extractResult = $zip->extractTo($webRoot);
                 $zip->close();
 
@@ -277,25 +274,25 @@ class DeploymentManager
                             }
 
                         } else {
-                            Logger::log("No index file: $domain");
-                            self::restoreOrCreateIndex($webRoot, $backupDir, $hasBackup);
+                            Logger::log("No index file after extraction: $domain");
+                            self::createPlaceholderIndex($webRoot);
                         }
                     } else {
                         Logger::log("Empty extraction: $domain");
-                        self::restoreBackupOrCreateIndex($webRoot, $backupDir, $hasBackup);
+                        self::createPlaceholderIndex($webRoot);
                     }
                 } else {
                     Logger::log("Extraction failed: $domain");
-                    self::restoreBackupOrCreateIndex($webRoot, $backupDir, $hasBackup);
+                    self::createPlaceholderIndex($webRoot);
                 }
             } else {
                 Logger::log("Empty ZIP: $domain");
                 $zip->close();
-                self::restoreBackupOrCreateIndex($webRoot, $backupDir, $hasBackup);
+                self::createPlaceholderIndex($webRoot);
             }
         } else {
             Logger::log("ZIP open failed: $domain");
-            self::restoreBackupOrCreateIndex($webRoot, $backupDir, $hasBackup);
+            self::createPlaceholderIndex($webRoot);
         }
 
         RedirectsManager::updateRedirects($domain, $user, $redirectsData);
@@ -304,7 +301,10 @@ class DeploymentManager
         exec("find $webRoot -type d -exec chmod 755 {} \\;");
         exec("find $webRoot -type f -exec chmod 644 {} \\;");
 
-        self::cleanup($zipFile, $backupDir, $hasBackup);
+        // Cleanup ZIP file
+        if (file_exists($zipFile)) {
+            unlink($zipFile);
+        }
 
         if ($extractionSuccess) {
             if ($isAutomaticDeploy) {
@@ -368,66 +368,4 @@ class DeploymentManager
         }
     }
 
-    /**
-     * Handle failed deployment by restoring backup or creating placeholder
-     */
-    private static function handleFailedDeployment($webRoot, $backupDir, $hasBackup, $domain, $user, $redirectsData, $zipFile)
-    {
-        if ($hasBackup) {
-            exec("cp -r $backupDir/* $webRoot/ 2>/dev/null");
-            exec("cp -r $backupDir/.[!.]* $webRoot/ 2>/dev/null");
-            Logger::log("Restored backup: $domain");
-        } else {
-            file_put_contents("$webRoot/index.html", "<html><body><h1>Site is being updated</h1><p>Please check back later.</p></body></html>");
-        }
-
-        RedirectsManager::updateRedirects($domain, $user, $redirectsData);
-        exec("chown -R $user:$user $webRoot");
-
-        self::cleanup($zipFile, $backupDir, $hasBackup);
-    }
-
-    /**
-     * Restore index file from backup or create new one
-     */
-    private static function restoreOrCreateIndex($webRoot, $backupDir, $hasBackup)
-    {
-        if ($hasBackup) {
-            if (file_exists("$backupDir/index.html")) {
-                copy("$backupDir/index.html", "$webRoot/index.html");
-            } elseif (file_exists("$backupDir/index.php")) {
-                copy("$backupDir/index.php", "$webRoot/index.php");
-            } else {
-                file_put_contents("$webRoot/index.html", "<html><body><h1>Site is being updated</h1><p>Please check back later.</p></body></html>");
-            }
-        } else {
-            file_put_contents("$webRoot/index.html", "<html><body><h1>Site is being updated</h1><p>Please check back later.</p></body></html>");
-        }
-    }
-
-    /**
-     * Restore backup or create placeholder index
-     */
-    private static function restoreBackupOrCreateIndex($webRoot, $backupDir, $hasBackup)
-    {
-        if ($hasBackup) {
-            exec("cp -r $backupDir/* $webRoot/ 2>/dev/null");
-            exec("cp -r $backupDir/.[!.]* $webRoot/ 2>/dev/null");
-        } else {
-            file_put_contents("$webRoot/index.html", "<html><body><h1>Site is being updated</h1><p>Please check back later.</p></body></html>");
-        }
-    }
-
-    /**
-     * Cleanup temporary files and directories
-     */
-    private static function cleanup($zipFile, $backupDir, $hasBackup)
-    {
-        if (file_exists($zipFile)) {
-            unlink($zipFile);
-        }
-        if ($hasBackup) {
-            exec("rm -rf $backupDir");
-        }
-    }
 }

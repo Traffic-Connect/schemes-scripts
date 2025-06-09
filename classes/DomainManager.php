@@ -325,18 +325,27 @@ class DomainManager
     {
         Logger::log("Verifying cleanup for domain: $domain");
 
-        // Проверяем остатки в Hestia
-        exec("grep -r '$domain' /usr/local/hestia/data/users/ 2>/dev/null", $hestiaRemains, $returnVar);
+        // Проверяем остатки в Hestia конфигах (исключаем history.log)
+        exec("grep -r '$domain' /usr/local/hestia/data/users/ --exclude='history.log' 2>/dev/null", $hestiaRemains, $returnVar);
         if ($returnVar === 0 && !empty($hestiaRemains)) {
             Logger::log("WARNING: Found remains in Hestia configs");
-            foreach ($hestiaRemains as $remain) {
-                Logger::log("  Remain: $remain");
+            $count = count($hestiaRemains);
+            Logger::log("  Found $count config entries (excluding history)");
+
+            // Показываем только первые 3 для краткости
+            $displayRemains = array_slice($hestiaRemains, 0, 3);
+            foreach ($displayRemains as $remain) {
+                Logger::log("  " . $remain);
+            }
+
+            if ($count > 3) {
+                Logger::log("  ... and " . ($count - 3) . " more entries");
             }
         } else {
             Logger::log("✓ Clean in Hestia configs");
         }
 
-        // Проверяем остатки в /etc
+        // Проверяем остатки в /etc (только первые 3)
         exec("find /etc -name '*$domain*' 2>/dev/null | head -3", $etcRemains);
         if (!empty($etcRemains)) {
             Logger::log("WARNING: Found remains in /etc");
