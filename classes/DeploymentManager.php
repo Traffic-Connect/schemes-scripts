@@ -43,7 +43,7 @@ class DeploymentManager
 
     /**
      * Check if site is empty and needs automatic deployment
-     * Simple logic: if no index file AND no static directory, deploy
+     * Logic: deploy if we DON'T have both index.php AND static directory
      */
     public static function needsAutomaticDeployment($domain, $user)
     {
@@ -54,22 +54,23 @@ class DeploymentManager
             return true;
         }
 
-        // Проверяем наличие index файлов
-        $hasIndex = file_exists("$webRoot/index.php") || file_exists("$webRoot/index.html");
+        // Проверяем наличие index.php (игнорируем index.html)
+        $hasIndexPhp = file_exists("$webRoot/index.php");
 
         // Проверяем наличие директории static
         $hasStaticDir = is_dir("$webRoot/static");
 
-        Logger::log("Checking $domain: hasIndex=" . ($hasIndex ? 'yes' : 'no') . ", hasStaticDir=" . ($hasStaticDir ? 'yes' : 'no'));
+        Logger::log("Checking $domain: hasIndexPhp=" . ($hasIndexPhp ? 'yes' : 'no') . ", hasStaticDir=" . ($hasStaticDir ? 'yes' : 'no'));
 
-        // Если нет индекса И нет папки static - нужен автоматический деплой
-        if (!$hasIndex && !$hasStaticDir) {
-            Logger::log("No index file and no static directory, needs automatic deployment: $domain");
-            return true;
+        // Если есть И index.php И папка static - НЕ нужен автоматический деплой
+        if ($hasIndexPhp && $hasStaticDir) {
+            Logger::log("Site has index.php and static directory, no automatic deployment needed: $domain");
+            return false;
         }
 
-        Logger::log("Site has required content, no automatic deployment needed: $domain");
-        return false;
+        // Во всех остальных случаях - нужен автоматический деплой
+        Logger::log("Missing index.php or static directory, needs automatic deployment: $domain");
+        return true;
     }
 
     /**
@@ -318,23 +319,30 @@ class DeploymentManager
     }
 
     /**
-     * Check if webroot has important content that should be backed up
-     * Simple logic: if has index file OR static directory, consider important
+     * Handle failed deployment by creating placeholder
      */
-    private static function hasImportantContent($webRoot)
+    private static function handleFailedDeployment($webRoot, $domain, $user, $redirectsData, $zipFile)
     {
-        if (!is_dir($webRoot)) {
-            return false;
+        Logger::log("Creating placeholder for failed deployment: $domain");
+        self::createPlaceholderIndex($webRoot);
+
+        RedirectsManager::updateRedirects($domain, $user, $redirectsData);
+        exec("chown -R $user:$user $webRoot");
+
+        // Cleanup ZIP file
+        if (file_exists($zipFile)) {
+            unlink($zipFile);
         }
+    }
 
-        // Проверяем наличие index файлов
-        $hasIndex = file_exists("$webRoot/index.php") || file_exists("$webRoot/index.html");
-
-        // Проверяем наличие директории static
-        $hasStaticDir = is_dir("$webRoot/static");
-
-        // Если есть индекс ИЛИ есть папка static - считаем важным контентом
-        return $hasIndex || $hasStaticDir;
+    /**
+     * Create placeholder index file
+     */
+    private static function createPlaceholderIndex($webRoot)
+    {
+        $placeholderContent = "<html><body><h1>Site is being updated</h1><p>Please check back later.</p></body></html>";
+        file_put_contents("$webRoot/index.html", $placeholderContent);
+        Logger::log("Created placeholder index.html");
     }
 
     /**
@@ -367,5 +375,4 @@ class DeploymentManager
             Logger::log("Could not retrieve domain information for: $domain");
         }
     }
-
 }
