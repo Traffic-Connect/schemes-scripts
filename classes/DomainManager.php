@@ -22,22 +22,14 @@ class DomainManager
         }
 
         Logger::log("Checking for domain ownership: $domain");
-        exec("/usr/local/hestia/bin/v-search-domain-owner $domain 2>/dev/null", $output, $returnVar);
 
-        if ($returnVar === 0 && !empty($output)) {
-            $existingUser = trim(implode("\n", $output));
+        // Более точная проверка владельца домена
+        $currentOwner = self::findDomainOwner($domain);
 
-            // Проверяем, что это действительно имя пользователя, а не сообщение об ошибке
-            if (!empty($existingUser) &&
-                $existingUser !== $user &&
-                !strpos($existingUser, 'Error:') &&
-                !strpos($existingUser, 'doesn\'t exist') &&
-                strlen($existingUser) < 100) { // Имя пользователя не должно быть очень длинным
-
-                Logger::log("Domain exists with different owner: $existingUser");
-                $domain = self::transferDomain($domain, $existingUser, $user);
-                return $domain;
-            }
+        if ($currentOwner && $currentOwner !== $user) {
+            Logger::log("Domain exists with owner: $currentOwner, transferring to: $user");
+            $domain = self::forceTransferDomain($domain, $currentOwner, $user);
+            return $domain;
         }
 
         Logger::log("Domain does not exist - creating new: $domain");
@@ -68,11 +60,369 @@ class DomainManager
         }
 
         Logger::log("Alternative method failed: " . implode("\n", $outputAlt));
-        Logger::log("Using low-level approach");
-
-        $domain = self::createDomainLowLevel($domain, $user);
+        Logger::log("ERROR: All domain creation methods failed");
 
         return $domain;
+    }
+
+    /**
+     * Find actual domain owner by checking all users
+     */
+    private static function findDomainOwner($domain)
+    {
+        Logger::log("Searching for domain owner: $domain");
+
+        // Получаем список всех пользователей
+        $usersDir = '/usr/local/hestia/data/users';
+        if (!is_dir($usersDir)) {
+            Logger::log("Users directory not found: $usersDir");
+            return null;
+        }
+
+        $users = scandir($usersDir);
+        foreach ($users as $user) {
+            if ($user === '.' || $user === '..') {
+                continue;
+            }
+
+            // Проверяем, есть ли домен у этого пользователя
+            exec("/usr/local/hestia/bin/v-list-web-domain $user $domain 2>/dev/null", $output, $returnVar);
+            if ($returnVar === 0) {
+                Logger::log("Found domain owner: $user");
+                return $user;
+            }
+        }
+
+        Logger::log("No owner found for domain: $domain");
+        return null;
+    }
+
+    /**
+     * Force transfer domain from one user to another with aggressive cleanup
+     */
+    private static function forceTransferDomain($domain, $currentUser, $targetUser)
+    {
+        Logger::log("FORCE TRANSFER: $domain from $currentUser to $targetUser");
+
+        $timestamp = time();
+        $tempDir = "/tmp/domain_transfer_$timestamp";
+        mkdir($tempDir, 0755, true);
+
+        // Step 1: Backup everything
+        self::backupDomainData($domain, $currentUser, $tempDir);
+
+        // Step 2: Aggressive domain removal from current user
+        self::aggressivelyRemoveDomain($domain, $currentUser);
+
+        // Step 3: Wait and verify removal
+        self::waitForDomainRemoval($domain, $currentUser);
+
+        // Step 4: Clean up any remaining traces system-wide
+        self::systemWideCleanup($domain);
+
+        // Step 5: Create domain for target user
+        self::createDomainForUser($domain, $targetUser);
+
+        // Step 6: Restore content and settings
+        self::restoreDomainData($domain, $targetUser, $tempDir);
+
+        // Step 7: Final verification and cleanup
+        self::verifyAndCleanup($domain, $targetUser, $tempDir);
+
+        Logger::log("FORCE TRANSFER COMPLETED: $domain");
+        return $domain;
+    }
+
+    /**
+     * Backup domain data before transfer
+     */
+    private static function backupDomainData($domain, $user, $tempDir)
+    {
+        Logger::log("Backing up domain data: $domain");
+
+        // Backup web content
+        $webRoot = "/home/$user/web/$domain/public_html";
+        if (is_dir($webRoot)) {
+            exec("cp -a $webRoot $tempDir/public_html");
+            Logger::log("Web content backed up");
+        } else {
+            mkdir("$tempDir/public_html", 0755, true);
+            Logger::log("No web content to backup");
+        }
+
+        // Backup configuration
+        $confDir = "/home/$user/conf/web/$domain";
+        if (is_dir($confDir)) {
+            exec("cp -a $confDir $tempDir/conf");
+            Logger::log("Configuration backed up");
+        }
+
+        // Get and save domain settings
+        exec("/usr/local/hestia/bin/v-list-web-domain $user $domain json 2>/dev/null", $domainInfo, $returnVar);
+        if ($returnVar === 0) {
+            $domainInfoJson = implode("\n", $domainInfo);
+            file_put_contents("$tempDir/domain_settings.json", $domainInfoJson);
+            Logger::log("Domain settings backed up");
+        }
+    }
+
+    /**
+     * Aggressively remove domain from user
+     */
+    private static function aggressivelyRemoveDomain($domain, $user)
+    {
+        Logger::log("Aggressively removing domain: $domain from user: $user");
+
+        $escapedUser = escapeshellarg($user);
+        $escapedDomain = escapeshellarg($domain);
+
+        // Force delete with multiple attempts
+        $deleteCommands = [
+            "/usr/local/hestia/bin/v-delete-web-domain $escapedUser $escapedDomain yes",
+            "/usr/local/hestia/bin/v-delete-dns-domain $escapedUser $escapedDomain yes",
+            "/usr/local/hestia/bin/v-delete-mail-domain $escapedUser $escapedDomain yes"
+        ];
+
+        foreach ($deleteCommands as $cmd) {
+            Logger::log("Executing: $cmd");
+            for ($attempt = 1; $attempt <= 3; $attempt++) {
+                exec($cmd . " 2>&1", $output, $returnVar);
+                Logger::log("Attempt $attempt: " . ($returnVar === 0 ? "SUCCESS" : "FAILED"));
+                if (!empty($output)) {
+                    Logger::log("Output: " . implode("\n", $output));
+                }
+                sleep(1);
+            }
+        }
+
+        // Force rebuild user config
+        Logger::log("Force rebuilding user config");
+        exec("/usr/local/hestia/bin/v-rebuild-user $escapedUser yes 2>&1", $output, $returnVar);
+        sleep(3);
+    }
+
+    /**
+     * Wait for domain to be completely removed
+     */
+    private static function waitForDomainRemoval($domain, $user)
+    {
+        Logger::log("Waiting for complete domain removal: $domain");
+
+        $maxAttempts = 20;
+        $attempt = 0;
+
+        while ($attempt < $maxAttempts) {
+            $attempt++;
+
+            exec("/usr/local/hestia/bin/v-list-web-domain $user $domain 2>/dev/null", $checkOutput, $checkReturnVar);
+
+            if ($checkReturnVar !== 0) {
+                Logger::log("Domain successfully removed after $attempt attempts");
+                return true;
+            }
+
+            Logger::log("Domain still exists, attempt $attempt/$maxAttempts");
+            sleep(2);
+        }
+
+        Logger::log("WARNING: Domain may still exist after $maxAttempts attempts");
+        return false;
+    }
+
+    /**
+     * System-wide cleanup of domain traces (based on your bash script)
+     */
+    private static function systemWideCleanup($domain)
+    {
+        Logger::log("System-wide cleanup for domain: $domain");
+
+        // 1. Удаляем из всех конфигов пользователей Hestia
+        exec("find /usr/local/hestia/data/users/ -name '*.conf' -exec sed -i '/$domain/d' {} \\;");
+        Logger::log("Cleaned from Hestia user configs");
+
+        // 2. Удаляем SSL сертификаты
+        exec("rm -rf /etc/letsencrypt/live/$domain* 2>/dev/null");
+        exec("rm -rf /etc/letsencrypt/archive/$domain* 2>/dev/null");
+        exec("rm -rf /etc/letsencrypt/renewal/$domain* 2>/dev/null");
+        exec("rm -rf /usr/local/hestia/ssl/$domain* 2>/dev/null");
+        Logger::log("SSL certificates cleaned");
+
+        // 3. Удаляем все веб-папки
+        exec("find /home -name '*$domain*' -type d -exec rm -rf {} \\; 2>/dev/null");
+        exec("find /var/www -name '*$domain*' -type d -exec rm -rf {} \\; 2>/dev/null");
+        Logger::log("Web directories cleaned");
+
+        // 4. Удаляем все конфиги Apache
+        exec("find /etc/apache2 -name '*$domain*' -exec rm -f {} \\; 2>/dev/null");
+        exec("find /etc/httpd -name '*$domain*' -exec rm -f {} \\; 2>/dev/null");
+        Logger::log("Apache configs cleaned");
+
+        // 5. Удаляем все конфиги Nginx
+        exec("find /etc/nginx -name '*$domain*' -exec rm -f {} \\; 2>/dev/null");
+        Logger::log("Nginx configs cleaned");
+
+        // 6. Удаляем из /etc/hosts
+        exec("sed -i '/$domain/d' /etc/hosts 2>/dev/null");
+        Logger::log("Hosts file cleaned");
+
+        // 7. Удаляем все логи
+        exec("find /var/log -name '*$domain*' -exec rm -f {} \\; 2>/dev/null");
+        Logger::log("Log files cleaned");
+
+        // 8. Удаляем из cron если есть
+        exec("find /var/spool/cron -name '*' -exec sed -i '/$domain/d' {} \\; 2>/dev/null");
+        Logger::log("Cron entries cleaned");
+
+        // 9. Очищаем конфиги от пустых строк
+        exec("find /usr/local/hestia/data/users/ -name '*.conf' -exec sed -i '/^$/d' {} \\;");
+        Logger::log("Empty lines cleaned from configs");
+
+        // 10. Перезапускаем все сервисы
+        exec("systemctl reload apache2 2>/dev/null");
+        exec("systemctl reload nginx 2>/dev/null");
+        exec("systemctl restart hestia 2>/dev/null");
+        Logger::log("All services restarted");
+
+        Logger::log("System-wide cleanup completed for: $domain");
+        sleep(3);
+    }
+
+    /**
+     * Create domain for target user (simplified, no low-level)
+     */
+    private static function createDomainForUser($domain, $user)
+    {
+        Logger::log("Creating domain for user: $user");
+
+        // Try standard creation methods
+        $methods = [
+            "/usr/local/hestia/bin/v-add-web-domain $user $domain",
+            "/usr/local/hestia/bin/v-add-web-domain $user $domain 'default' 'no'",
+            "/usr/local/hestia/bin/v-add-web-domain $user $domain 'default' 'no' '' '' '' '' '' '' 'tc-nginx-only'"
+        ];
+
+        foreach ($methods as $method) {
+            Logger::log("Trying: $method");
+            exec($method . " 2>&1", $output, $returnVar);
+
+            if ($returnVar === 0) {
+                Logger::log("Domain created successfully with: $method");
+                return true;
+            } else {
+                Logger::log("Method failed: " . implode("\n", $output));
+            }
+            sleep(1);
+        }
+
+        Logger::log("ERROR: All domain creation methods failed for: $domain");
+        return false;
+    }
+
+    /**
+     * Verify domain cleanup (based on your verification logic)
+     */
+    private static function verifyDomainCleanup($domain)
+    {
+        Logger::log("Verifying cleanup for domain: $domain");
+
+        // Проверяем остатки в Hestia
+        exec("grep -r '$domain' /usr/local/hestia/data/users/ 2>/dev/null", $hestiaRemains, $returnVar);
+        if ($returnVar === 0 && !empty($hestiaRemains)) {
+            Logger::log("WARNING: Found remains in Hestia configs");
+            foreach ($hestiaRemains as $remain) {
+                Logger::log("  Remain: $remain");
+            }
+        } else {
+            Logger::log("✓ Clean in Hestia configs");
+        }
+
+        // Проверяем остатки в /etc
+        exec("find /etc -name '*$domain*' 2>/dev/null | head -3", $etcRemains);
+        if (!empty($etcRemains)) {
+            Logger::log("WARNING: Found remains in /etc");
+            foreach ($etcRemains as $remain) {
+                Logger::log("  Remain file: $remain");
+            }
+        } else {
+            Logger::log("✓ Clean in /etc");
+        }
+
+        Logger::log("Cleanup verification completed");
+    }
+
+    /**
+     * Restore domain data after transfer
+     */
+    private static function restoreDomainData($domain, $user, $tempDir)
+    {
+        Logger::log("Restoring domain data for: $domain");
+
+        $newWebRoot = "/home/$user/web/$domain/public_html";
+
+        // Ensure directory exists
+        if (!is_dir($newWebRoot)) {
+            mkdir($newWebRoot, 0755, true);
+        }
+
+        // Clean and restore content
+        exec("rm -rf $newWebRoot/* 2>/dev/null");
+        exec("rm -rf $newWebRoot/.[!.]* 2>/dev/null");
+
+        if (is_dir("$tempDir/public_html")) {
+            exec("cp -a $tempDir/public_html/* $newWebRoot/ 2>/dev/null");
+            exec("cp -a $tempDir/public_html/.[!.]* $newWebRoot/ 2>/dev/null");
+            Logger::log("Content restored");
+        }
+
+        // Set permissions
+        exec("chown -R $user:$user /home/$user/web/$domain");
+        exec("find $newWebRoot -type d -exec chmod 755 {} \\;");
+        exec("find $newWebRoot -type f -exec chmod 644 {} \\;");
+
+        // Set proxy template
+        exec("/usr/local/hestia/bin/v-change-web-domain-proxy-tpl $user $domain tc-nginx-only 2>&1", $output, $returnVar);
+        if ($returnVar === 0) {
+            Logger::log("Proxy template set successfully");
+        } else {
+            Logger::log("Failed to set proxy template: " . implode("\n", $output));
+        }
+    }
+
+    /**
+     * Verify transfer and cleanup
+     */
+    private static function verifyAndCleanup($domain, $user, $tempDir)
+    {
+        Logger::log("Verifying transfer and cleaning up");
+
+        // Verify domain exists for user
+        exec("/usr/local/hestia/bin/v-list-web-domain $user $domain 2>/dev/null", $output, $returnVar);
+        if ($returnVar === 0) {
+            Logger::log("✓ Transfer verified: domain exists for user $user");
+        } else {
+            Logger::log("WARNING: Transfer verification failed - domain not found for user $user");
+        }
+
+        // Verify cleanup was successful
+        self::verifyDomainCleanup($domain);
+
+        // Rebuild configurations
+        exec("/usr/local/hestia/bin/v-rebuild-web-domains $user 2>&1", $output, $returnVar);
+        exec("/usr/local/hestia/bin/v-rebuild-user $user yes 2>&1", $output, $returnVar);
+        Logger::log("User configurations rebuilt");
+
+        // Test and reload nginx
+        exec("nginx -t 2>&1", $nginxTest, $nginxTestReturn);
+        if ($nginxTestReturn === 0) {
+            exec("systemctl reload nginx 2>&1");
+            Logger::log("✓ Nginx configuration validated and reloaded");
+        } else {
+            Logger::log("WARNING: Nginx configuration issues: " . implode("\n", $nginxTest));
+        }
+
+        // Cleanup temp directory
+        exec("rm -rf $tempDir");
+        Logger::log("Temporary files cleaned up");
     }
 
     /**
@@ -263,69 +613,4 @@ class DomainManager
         Logger::log("Domain deletion process completed for $domain");
     }
 
-    /**
-     * Create domain using low-level approach
-     */
-    private static function createDomainLowLevel($domain, $user, $proxyTemplate = 'tc-nginx-only')
-    {
-        Logger::log("Creating domain using low-level approach: $domain for $user");
-
-        $webRoot = "/home/$user/web/$domain";
-        $publicHtml = "$webRoot/public_html";
-
-        if (!is_dir($webRoot)) {
-            mkdir($webRoot, 0755, true);
-        }
-
-        if (!is_dir($publicHtml)) {
-            mkdir($publicHtml, 0755, true);
-        }
-
-        exec("chown -R $user:$user $webRoot");
-
-        exec("hostname -I | awk '{print $1}'", $ipAddress);
-        $ip = trim($ipAddress[0] ?? '');
-        if (empty($ip)) {
-            exec("curl -s ifconfig.me", $ipAddress);
-            $ip = trim($ipAddress[0] ?? '127.0.0.1');
-        }
-
-        $webConfFile = "/usr/local/hestia/data/users/$user/web.conf";
-
-        if (file_exists($webConfFile)) {
-            $currentDate = date("Y-m-d H:i:s");
-
-            $domainEntry = "WEB_DOMAIN='$domain' IP='$ip' IP6='' WEB_TPL='default' BACKEND='php-fpm' PROXY='$proxyTemplate' PROXY_EXT='html,htm,php' SSL='no' SSL_HOME='same' STATS='' STATS_AUTH='' STATS_USER='' U_DISK='0' U_BANDWIDTH='0' SUSPENDED='no' TIME='$currentDate' DATE='$currentDate'\n";
-
-            file_put_contents($webConfFile, $domainEntry, FILE_APPEND);
-            Logger::log("Manually added domain entry to web.conf");
-
-            $confDir = "/home/$user/conf/web/$domain";
-            if (!is_dir($confDir)) {
-                mkdir($confDir, 0755, true);
-                exec("chown $user:$user $confDir");
-            }
-
-            exec("/usr/local/hestia/bin/v-rebuild-web-domains $user");
-
-            exec("/usr/local/hestia/bin/v-list-web-domain $user $domain 2>/dev/null", $output, $returnVar);
-
-            if ($returnVar === 0) {
-                Logger::log("Low-level domain addition successful");
-            } else {
-                Logger::log("Warning: Low-level domain addition might have issues");
-
-                Logger::log("Restarting services");
-                exec("/usr/local/hestia/bin/v-restart-service 'nginx'");
-                exec("/usr/local/hestia/bin/v-restart-service 'apache2'");
-                exec("/usr/local/hestia/bin/v-restart-service 'hestia'");
-
-                exec("/usr/local/hestia/bin/v-rebuild-user $user 'yes'");
-            }
-        } else {
-            Logger::log("Error: web.conf not found for user $user");
-        }
-
-        return $domain;
-    }
 }
