@@ -156,6 +156,13 @@ class DeploymentManager
             return;
         }
 
+        // Проверяем, существует ли уже файл в корне сайта
+        $gscFilePath = "$webRoot/$gscFileName";
+        if (file_exists($gscFilePath)) {
+            Logger::log("GSC verification file already exists: $gscFileName");
+            return;
+        }
+
         Logger::log("Downloading GSC file: $gscFileName from $gscFileUrl");
 
         $ch = curl_init($gscFileUrl);
@@ -169,8 +176,6 @@ class DeploymentManager
         curl_close($ch);
 
         if ($gscContent !== false && $httpCode == 200) {
-            $gscFilePath = "$webRoot/$gscFileName";
-
             if (file_put_contents($gscFilePath, $gscContent) !== false) {
                 chmod($gscFilePath, 0644);
                 Logger::log("GSC verification file downloaded and placed: $gscFileName");
@@ -179,6 +184,46 @@ class DeploymentManager
             }
         } else {
             Logger::log("Failed to download GSC file from: $gscFileUrl (HTTP: $httpCode)");
+        }
+    }
+
+    /**
+     * Check and add missing GSC verification file if needed
+     */
+    public static function checkAndAddGSCFile($domain, $user, $gscFileUrl)
+    {
+        if (empty($gscFileUrl)) {
+            return;
+        }
+
+        $webRoot = "/home/$user/web/$domain/public_html";
+
+        if (!is_dir($webRoot)) {
+            Logger::log("Web root doesn't exist for GSC check: $domain");
+            return;
+        }
+
+        $gscFileName = basename(parse_url($gscFileUrl, PHP_URL_PATH));
+
+        if (empty($gscFileName)) {
+            Logger::log("Invalid GSC file URL for check: $gscFileUrl");
+            return;
+        }
+
+        $gscFilePath = "$webRoot/$gscFileName";
+
+        // Если файл не существует - добавляем его
+        if (!file_exists($gscFilePath)) {
+            Logger::log("GSC file missing, adding: $gscFileName for domain: $domain");
+            self::downloadGoogleVerificationFile($webRoot, $gscFileUrl);
+
+            // Устанавливаем правильные права доступа
+            if (file_exists($gscFilePath)) {
+                exec("chown $user:$user $gscFilePath");
+                chmod($gscFilePath, 0644);
+            }
+        } else {
+            Logger::log("GSC file already exists: $gscFileName for domain: $domain");
         }
     }
 
