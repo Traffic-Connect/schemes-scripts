@@ -195,7 +195,7 @@ echo ""
 
 # Show API config location for reference
 API_LOCATIONS=(
-    "/usr/local/hestia/conf/api.conf"
+    "/usr/local/hestia/conf/hestia.conf"
     "/usr/local/hestia/data/api/api.conf"
     "/etc/hestia/api.conf"
     "/home/admin/conf/api.conf"

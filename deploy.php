@@ -69,6 +69,9 @@ class SchemaDeployer
     /**
      * Process single site deployment
      */
+    /**
+     * Process single site deployment (обновленная версия)
+     */
     private static function processSite($site, $currentDomains, $schemaUser, $schemaName, &$previousState, $shouldDeploy, $zipUrl)
     {
         $originalDomain = $site['domain'];
@@ -121,7 +124,28 @@ class SchemaDeployer
             $previousState[$domainStateKey] = date('Y-m-d H:i:s');
         } else {
             Logger::log("No deployment needed for: $hestiaDomain");
+
+            // Даже если деплой не нужен, проверяем GSC файл
+            self::checkGSCFiles($site, $hestiaDomain, $schemaUser);
         }
+    }
+
+    /**
+     * Check and add missing GSC files for all sites
+     */
+    private static function checkGSCFiles($site, $hestiaDomain, $schemaUser)
+    {
+        // Проверяем есть ли GSC файл в данных сайта
+        $gscFileUrl = isset($site['gsc_file_url']) ? $site['gsc_file_url'] : null;
+
+        if (empty($gscFileUrl)) {
+            return; // Нет GSC файла в API - ничего не делаем
+        }
+
+        Logger::log("Checking GSC file for domain: $hestiaDomain");
+
+        // Используем метод из DeploymentManager для проверки и добавления GSC файла
+        DeploymentManager::checkAndAddGSCFile($hestiaDomain, $schemaUser, $gscFileUrl);
     }
 
     /**
