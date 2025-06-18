@@ -202,11 +202,12 @@ sudo -u "$USER" wp config create \
 }
 
 # Добавляем дополнительные настройки в wp-config.php
-sudo -u "$USER" wp config set WP_DEBUG false --allow-root >/dev/null 2>&1
-sudo -u "$USER" wp config set WP_DEBUG_LOG false --allow-root >/dev/null 2>&1
-sudo -u "$USER" wp config set WP_DEBUG_DISPLAY false --allow-root >/dev/null 2>&1
-sudo -u "$USER" wp config set DISALLOW_FILE_EDIT true --allow-root >/dev/null 2>&1
-sudo -u "$USER" wp config set AUTOMATIC_UPDATER_DISABLED true --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp config set WP_DEBUG false --raw --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp config set WP_DEBUG_LOG false --raw --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp config set WP_DEBUG_DISPLAY false --raw --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp config set DISALLOW_FILE_EDIT true --raw --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp config set AUTOMATIC_UPDATER_DISABLED true --raw --allow-root >/dev/null 2>&1
+
 
 # Добавляем поддержку HTTPS через прокси
 sudo -u "$USER" sed -i '/\/\* That'"'"'s all, stop editing!/i\
