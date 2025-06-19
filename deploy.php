@@ -84,6 +84,7 @@ class SchemaDeployer
         $domainNeverDeployed = empty($previousState[$domainStateKey]);
         $needsDeployment = DeploymentManager::needsDeployment($hestiaDomain, $schemaUser);
 
+        // Новая проверка: нужен ли автоматический деплой для пустого сайта
         $needsAutomaticDeployment = DeploymentManager::needsAutomaticDeployment($hestiaDomain, $schemaUser);
 
         if ($redirectsChanged) {
@@ -97,8 +98,10 @@ class SchemaDeployer
             RedirectsManager::updateRedirects($hestiaDomain, $schemaUser, $redirectsData);
         }
 
+        // Определяем нужно ли деплоить
         $shouldDeployNow = $shouldDeploy || $domainNeverDeployed || $needsDeployment || $needsAutomaticDeployment;
 
+        // Инициализируем результат для этого домена
         $deploymentResults[$hestiaDomain] = [
             'deployed' => false,
             'success' => false,
@@ -108,8 +111,10 @@ class SchemaDeployer
         if ($shouldDeployNow) {
             $gscFileUrl = isset($site['gsc_file_url']) ? $site['gsc_file_url'] : null;
 
+            // Отмечаем что был деплой
             $deploymentResults[$hestiaDomain]['deployed'] = true;
 
+            // Проверяем причину деплоя для логирования
             if ($needsAutomaticDeployment) {
                 $deploymentResults[$hestiaDomain]['was_automatic'] = true;
                 Logger::log("Triggering automatic deployment for empty site: $hestiaDomain");
@@ -144,14 +149,16 @@ class SchemaDeployer
      */
     private static function checkGSCFiles($site, $hestiaDomain, $schemaUser)
     {
+        // Проверяем есть ли GSC файл в данных сайта
         $gscFileUrl = isset($site['gsc_file_url']) ? $site['gsc_file_url'] : null;
 
         if (empty($gscFileUrl)) {
-            return;
+            return; // Нет GSC файла в API - ничего не делаем
         }
 
         Logger::log("Checking GSC file for domain: $hestiaDomain");
 
+        // Используем метод из DeploymentManager для проверки и добавления GSC файла
         DeploymentManager::checkAndAddGSCFile($hestiaDomain, $schemaUser, $gscFileUrl);
     }
 
@@ -187,7 +194,7 @@ class SchemaDeployer
         $output = [];
         $returnCode = 0;
 
-        exec('systemctl restart nginx 2>&1', $output, $returnCode);
+        exec('systemctl reload nginx 2>&1', $output, $returnCode);
 
         if ($returnCode === 0) {
             Logger::log("Nginx reloaded successfully");
@@ -232,34 +239,42 @@ class SchemaDeployer
             self::processSite($site, $currentDomains, $schemaUser, $schemaName, $previousState, $shouldDeploy, $zipUrl, $deploymentResults);
         }
 
+        // Проверяем нужно ли перезагружать Nginx
         if ($shouldDeploy) {
-            $allSitesDeployed = true;
-            $allDeploymentsSuccessful = true;
+            $hasSuccessfulDeployments = false;
+            $hasFailedDeployments = false;
             $hasNonAutomaticDeployments = false;
+            $totalDeployAttempts = 0;
+            $successfulDeployments = 0;
 
             foreach ($deploymentResults as $domain => $result) {
-                if (!$result['deployed']) {
-                    $allSitesDeployed = false;
-                    break;
-                }
+                if ($result['deployed']) {
+                    $totalDeployAttempts++;
 
-                if (!$result['success']) {
-                    $allDeploymentsSuccessful = false;
-                }
+                    if ($result['success']) {
+                        $hasSuccessfulDeployments = true;
+                        $successfulDeployments++;
+                    } else {
+                        $hasFailedDeployments = true;
+                    }
 
-                if ($result['deployed'] && !$result['was_automatic']) {
-                    $hasNonAutomaticDeployments = true;
+                    // Проверяем есть ли обычные (не автоматические) деплои
+                    if (!$result['was_automatic']) {
+                        $hasNonAutomaticDeployments = true;
+                    }
                 }
             }
 
-
-            if ($allSitesDeployed && $allDeploymentsSuccessful && $hasNonAutomaticDeployments) {
-                Logger::log("All sites deployed successfully for schema $schemaName, reloading Nginx");
+            // Перезагружаем Nginx если:
+            // 1. Был полный деплой архива (shouldDeploy = true)
+            // 2. Есть хотя бы один успешный деплой
+            // 3. Есть хотя бы один обычный (не автоматический) деплой
+            if ($hasSuccessfulDeployments && $hasNonAutomaticDeployments) {
+                Logger::log("Schema $schemaName: $successfulDeployments successful deployments out of $totalDeployAttempts attempts, reloading Nginx");
                 self::reloadNginx();
             } else {
                 $reasons = [];
-                if (!$allSitesDeployed) $reasons[] = "not all sites deployed";
-                if (!$allDeploymentsSuccessful) $reasons[] = "some deployments failed";
+                if (!$hasSuccessfulDeployments) $reasons[] = "no successful deployments";
                 if (!$hasNonAutomaticDeployments) $reasons[] = "only automatic deployments";
 
                 Logger::log("Skipping Nginx reload for schema $schemaName. Reason: " . implode(", ", $reasons));
