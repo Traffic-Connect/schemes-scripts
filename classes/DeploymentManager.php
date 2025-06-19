@@ -229,6 +229,7 @@ class DeploymentManager
 
     /**
      * Deploy ZIP archive to domain
+     * @return bool Returns true if deployment was successful, false otherwise
      */
     public static function deployZip($domain, $zipUrl, $user, $redirectsData, $gscFileUrl = null, $originalDomain = null, $isAutomaticDeploy = false)
     {
@@ -277,7 +278,7 @@ class DeploymentManager
         if (!$downloadSuccess) {
             Logger::log("Download failed: $domain");
             self::handleFailedDeployment($webRoot, $domain, $user, $redirectsData, $zipFile);
-            return;
+            return false;
         }
 
         $zip = new ZipArchive;
@@ -358,8 +359,10 @@ class DeploymentManager
             } else {
                 Logger::log("Deployment successful: $domain");
             }
+            return true;
         } else {
             Logger::log("Deployment issues: $domain");
+            return false;
         }
     }
 

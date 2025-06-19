@@ -69,10 +69,7 @@ class SchemaDeployer
     /**
      * Process single site deployment
      */
-    /**
-     * Process single site deployment (обновленная версия)
-     */
-    private static function processSite($site, $currentDomains, $schemaUser, $schemaName, &$previousState, $shouldDeploy, $zipUrl)
+    private static function processSite($site, $currentDomains, $schemaUser, $schemaName, &$previousState, $shouldDeploy, $zipUrl, &$deploymentResults)
     {
         $originalDomain = $site['domain'];
         $isWwwDomain = (strpos($originalDomain, 'www.') === 0);
@@ -87,7 +84,6 @@ class SchemaDeployer
         $domainNeverDeployed = empty($previousState[$domainStateKey]);
         $needsDeployment = DeploymentManager::needsDeployment($hestiaDomain, $schemaUser);
 
-        // Новая проверка: нужен ли автоматический деплой для пустого сайта
         $needsAutomaticDeployment = DeploymentManager::needsAutomaticDeployment($hestiaDomain, $schemaUser);
 
         if ($redirectsChanged) {
@@ -101,16 +97,25 @@ class SchemaDeployer
             RedirectsManager::updateRedirects($hestiaDomain, $schemaUser, $redirectsData);
         }
 
-        // Определяем нужно ли деплоить
         $shouldDeployNow = $shouldDeploy || $domainNeverDeployed || $needsDeployment || $needsAutomaticDeployment;
+
+        $deploymentResults[$hestiaDomain] = [
+            'deployed' => false,
+            'success' => false,
+            'was_automatic' => false
+        ];
 
         if ($shouldDeployNow) {
             $gscFileUrl = isset($site['gsc_file_url']) ? $site['gsc_file_url'] : null;
 
-            // Проверяем причину деплоя для логирования
+            $deploymentResults[$hestiaDomain]['deployed'] = true;
+
             if ($needsAutomaticDeployment) {
+                $deploymentResults[$hestiaDomain]['was_automatic'] = true;
                 Logger::log("Triggering automatic deployment for empty site: $hestiaDomain");
-                DeploymentManager::deployZip($hestiaDomain, $zipUrl, $schemaUser, $redirectsData, $gscFileUrl, $originalDomain, true);
+
+                $deploySuccess = DeploymentManager::deployZip($hestiaDomain, $zipUrl, $schemaUser, $redirectsData, $gscFileUrl, $originalDomain, true);
+                $deploymentResults[$hestiaDomain]['success'] = $deploySuccess;
             } else {
                 $reason = [];
                 if ($shouldDeploy) $reason[] = "ZIP updated";
@@ -118,10 +123,14 @@ class SchemaDeployer
                 if ($needsDeployment) $reason[] = "missing content";
 
                 Logger::log("Deploying $hestiaDomain. Reason: " . implode(", ", $reason));
-                DeploymentManager::deployZip($hestiaDomain, $zipUrl, $schemaUser, $redirectsData, $gscFileUrl, $originalDomain, false);
+
+                $deploySuccess = DeploymentManager::deployZip($hestiaDomain, $zipUrl, $schemaUser, $redirectsData, $gscFileUrl, $originalDomain, false);
+                $deploymentResults[$hestiaDomain]['success'] = $deploySuccess;
             }
 
-            $previousState[$domainStateKey] = date('Y-m-d H:i:s');
+            if ($deploymentResults[$hestiaDomain]['success']) {
+                $previousState[$domainStateKey] = date('Y-m-d H:i:s');
+            }
         } else {
             Logger::log("No deployment needed for: $hestiaDomain");
 
@@ -135,17 +144,58 @@ class SchemaDeployer
      */
     private static function checkGSCFiles($site, $hestiaDomain, $schemaUser)
     {
-        // Проверяем есть ли GSC файл в данных сайта
         $gscFileUrl = isset($site['gsc_file_url']) ? $site['gsc_file_url'] : null;
 
         if (empty($gscFileUrl)) {
-            return; // Нет GSC файла в API - ничего не делаем
+            return;
         }
 
         Logger::log("Checking GSC file for domain: $hestiaDomain");
 
-        // Используем метод из DeploymentManager для проверки и добавления GSC файла
         DeploymentManager::checkAndAddGSCFile($hestiaDomain, $schemaUser, $gscFileUrl);
+    }
+
+    /**
+     * Check if Nginx configuration is valid
+     */
+    private static function isNginxConfigValid()
+    {
+        $output = [];
+        $returnCode = 0;
+
+        exec('nginx -t 2>&1', $output, $returnCode);
+
+        if ($returnCode === 0) {
+            Logger::log("Nginx configuration is valid");
+            return true;
+        } else {
+            Logger::log("Nginx configuration has errors: " . implode("\n", $output));
+            return false;
+        }
+    }
+
+    /**
+     * Reload Nginx safely
+     */
+    private static function reloadNginx()
+    {
+        if (!self::isNginxConfigValid()) {
+            Logger::log("Skipping Nginx reload due to configuration errors");
+            return false;
+        }
+
+        $output = [];
+        $returnCode = 0;
+
+        exec('systemctl restart nginx 2>&1', $output, $returnCode);
+
+        if ($returnCode === 0) {
+            Logger::log("Nginx reloaded successfully");
+            return true;
+        } else {
+            Logger::log("Failed to reload Nginx: " . implode("\n", $output));
+            return false;
+        }
     }
 
     /**
@@ -176,9 +226,44 @@ class SchemaDeployer
         self::cleanupUnusedDomains($schemas, $schema, $schemaUser);
 
         $currentDomains = array_column($schema['sites'], 'domain');
+        $deploymentResults = [];
 
         foreach ($schema['sites'] as $site) {
-            self::processSite($site, $currentDomains, $schemaUser, $schemaName, $previousState, $shouldDeploy, $zipUrl);
+            self::processSite($site, $currentDomains, $schemaUser, $schemaName, $previousState, $shouldDeploy, $zipUrl, $deploymentResults);
+        }
+
+        if ($shouldDeploy) {
+            $allSitesDeployed = true;
+            $allDeploymentsSuccessful = true;
+            $hasNonAutomaticDeployments = false;
+
+            foreach ($deploymentResults as $domain => $result) {
+                if (!$result['deployed']) {
+                    $allSitesDeployed = false;
+                    break;
+                }
+
+                if (!$result['success']) {
+                    $allDeploymentsSuccessful = false;
+                }
+
+                if ($result['deployed'] && !$result['was_automatic']) {
+                    $hasNonAutomaticDeployments = true;
+                }
+            }
+
+
+            if ($allSitesDeployed && $allDeploymentsSuccessful && $hasNonAutomaticDeployments) {
+                Logger::log("All sites deployed successfully for schema $schemaName, reloading Nginx");
+                self::reloadNginx();
+            } else {
+                $reasons = [];
+                if (!$allSitesDeployed) $reasons[] = "not all sites deployed";
+                if (!$allDeploymentsSuccessful) $reasons[] = "some deployments failed";
+                if (!$hasNonAutomaticDeployments) $reasons[] = "only automatic deployments";
+
+                Logger::log("Skipping Nginx reload for schema $schemaName. Reason: " . implode(", ", $reasons));
+            }
         }
 
         $previousState[$schemaName] = [
