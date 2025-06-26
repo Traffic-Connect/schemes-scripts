@@ -7,4 +7,5 @@ class Config
     const TEMP_DIR = '/root/schemas/temp';
     const LOG_FILE = '/root/schemas/schema_deploy.log';
     const STATE_FILE = '/root/schemas/state.json';
+    const LOCK_FILE = '/tmp/schema_deploy.lock';
 }
