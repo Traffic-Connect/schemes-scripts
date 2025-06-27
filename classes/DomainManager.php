@@ -7,7 +7,10 @@ class DomainManager
     /**
      * Create domain for user or transfer from another user
      */
-    public static function createDomain($domain, $user)
+    /**
+     * Create domain for user or transfer from another user
+     */
+    public static function createDomain($domain, $user, $serverIp = null)
     {
         $originalDomain = $domain;
         $isWwwDomain = (strpos($domain, 'www.') === 0);
@@ -34,9 +37,10 @@ class DomainManager
 
         Logger::log("Domain does not exist - creating new: $domain");
 
-        Logger::log("Adding domain to user $user: $domain");
+        Logger::log("Adding domain to user $user: $domain with IP: " . ($serverIp ?: 'default'));
         $output = [];
-        exec("/usr/local/hestia/bin/v-add-web-domain $user $domain 2>&1", $output, $returnVar);
+        $ipParam = $serverIp ?: 'default';
+        exec("/usr/local/hestia/bin/v-add-web-domain $user $domain $ipParam 2>&1", $output, $returnVar);
 
         if ($returnVar === 0) {
             Logger::log("Domain created successfully: $domain");
@@ -52,7 +56,7 @@ class DomainManager
         Logger::log("Standard domain creation failed: " . implode("\n", $output));
 
         Logger::log("Trying alternative domain creation method");
-        exec("/usr/local/hestia/bin/v-add-web-domain $user $domain 'default' 'no' '' '' '' '' '' '' 'tc-nginx-only' 2>&1", $outputAlt, $returnVarAlt);
+        exec("/usr/local/hestia/bin/v-add-web-domain $user $domain $ipParam 'no' '' '' '' '' '' '' 'tc-nginx-only' 2>&1", $outputAlt, $returnVarAlt);
 
         if ($returnVarAlt === 0) {
             Logger::log("Alternative domain creation successful");

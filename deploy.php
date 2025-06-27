@@ -69,12 +69,16 @@ class SchemaDeployer
     /**
      * Process single site deployment
      */
-    private static function processSite($site, $currentDomains, $schemaUser, $schemaName, &$previousState, $shouldDeploy, $zipUrl, &$deploymentResults)
+    /**
+     * Process single site deployment
+     */
+    private static function processSite($site, $currentDomains, $schemaUser, $schemaName, &$previousState, $shouldDeploy, $zipUrl, &$deploymentResults, $schema)
     {
         $originalDomain = $site['domain'];
         $isWwwDomain = (strpos($originalDomain, 'www.') === 0);
 
-        $hestiaDomain = DomainManager::createDomain($originalDomain, $schemaUser);
+        $serverIp = $schema['server']['address'] ?? null;
+        $hestiaDomain = DomainManager::createDomain($originalDomain, $schemaUser, $serverIp);
 
         $redirectsData = RedirectsManager::prepareRedirectsData($site, $currentDomains, $isWwwDomain);
         $redirectsChanged = RedirectsManager::hasChanged($previousState, $schemaName, $hestiaDomain, $site, $currentDomains, $isWwwDomain);
