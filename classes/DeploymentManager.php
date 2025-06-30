@@ -406,7 +406,7 @@ class DeploymentManager
             $currentProxyTemplate = $domainData[$domain]['PROXY'] ?? '';
 
             $currentIp = $domainData[$domain]['IP'] ?? '';
-            $primaryIp = trim(shell_exec("hostname -I | awk '{print \$1}'"));
+            $primaryIp = ApiClient::getServerIp();
 
             if ($currentProxyTemplate !== 'tc-nginx-only') {
                 Logger::log("Setting proxy template tc-nginx-only for domain: $domain");
