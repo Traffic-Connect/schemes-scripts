@@ -405,6 +405,9 @@ class DeploymentManager
         if ($domainData && isset($domainData[$domain])) {
             $currentProxyTemplate = $domainData[$domain]['PROXY'] ?? '';
 
+            $currentIp = $domainData[$domain]['IP'] ?? '';
+            $primaryIp = trim(shell_exec("hostname -I | awk '{print \$1}'"));
+
             if ($currentProxyTemplate !== 'tc-nginx-only') {
                 Logger::log("Setting proxy template tc-nginx-only for domain: $domain");
 
@@ -418,6 +421,21 @@ class DeploymentManager
                 }
             } else {
                 Logger::log("Domain $domain already has tc-nginx-only proxy template");
+            }
+
+            if (!empty($primaryIp) && $currentIp !== $primaryIp) {
+                Logger::log("Changing IP for $domain from $currentIp to $primaryIp");
+
+                $setIpCmd = "sudo /usr/local/hestia/bin/v-change-web-domain-ip $user $domain $primaryIp";
+                exec($setIpCmd, $ipOutput, $ipReturnCode);
+
+                if ($ipReturnCode === 0) {
+                    Logger::log("IP $primaryIp set successfully for: $domain");
+                } else {
+                    Logger::log("Failed to set IP for: $domain. Error: " . implode("\n", $ipOutput));
+                }
+            } else {
+                Logger::log("Domain $domain already uses IP $primaryIp");
             }
         } else {
             Logger::log("Could not retrieve domain information for: $domain");
