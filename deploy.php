@@ -8,7 +8,6 @@ require_once 'classes/UserManager.php';
 require_once 'classes/DomainManager.php';
 require_once 'classes/RedirectsManager.php';
 require_once 'classes/DeploymentManager.php';
-require_once 'classes/ExecutionLock.php';
 
 class SchemaDeployer
 {
@@ -174,6 +173,7 @@ class SchemaDeployer
         exec('nginx -t 2>&1', $output, $returnCode);
 
         if ($returnCode === 0) {
+            Logger::log("Nginx configuration is valid");
             return true;
         } else {
             Logger::log("Nginx configuration has errors: " . implode("\n", $output));
@@ -208,7 +208,7 @@ class SchemaDeployer
     /**
      * Process single schema
      */
-    private static function processSchema($schemas, $schema, &$previousState): bool
+    private static function processSchema($schemas, $schema, &$previousState)
     {
         $schemaName = $schema['name'];
         $zipUrl = $schema['zip_url'] ?? null;
@@ -218,7 +218,7 @@ class SchemaDeployer
 
         if (empty($zipUrl)) {
             Logger::log("No ZIP: $schemaName");
-            return false;
+            return;
         }
 
         $schemaUser = UserManager::createSchemaUser($schemaName);
@@ -236,11 +236,7 @@ class SchemaDeployer
         $deploymentResults = [];
 
         foreach ($schema['sites'] as $site) {
-            try {
-                self::processSite($site, $currentDomains, $schemaUser, $schemaName, $previousState, $shouldDeploy, $zipUrl, $deploymentResults);
-            } catch (Throwable $e) {
-                Logger::log("Error deploying site {$site['domain']}: " . $e->getMessage());
-            }
+            self::processSite($site, $currentDomains, $schemaUser, $schemaName, $previousState, $shouldDeploy, $zipUrl, $deploymentResults);
         }
 
         // Проверяем нужно ли перезагружать Nginx
@@ -275,10 +271,13 @@ class SchemaDeployer
             // 3. Есть хотя бы один обычный (не автоматический) деплой
             if ($hasSuccessfulDeployments && $hasNonAutomaticDeployments) {
                 Logger::log("Schema $schemaName: $successfulDeployments successful deployments out of $totalDeployAttempts attempts, reloading Nginx");
+                self::reloadNginx();
             } else {
                 $reasons = [];
                 if (!$hasSuccessfulDeployments) $reasons[] = "no successful deployments";
                 if (!$hasNonAutomaticDeployments) $reasons[] = "only automatic deployments";
+
+                Logger::log("Skipping Nginx reload for schema $schemaName. Reason: " . implode(", ", $reasons));
             }
         }
 
@@ -286,8 +285,6 @@ class SchemaDeployer
             'zip_uploaded_at' => $zipUploadedAt,
             'last_processed' => date('Y-m-d H:i:s')
         ];
-
-        return $shouldDeploy && $hasSuccessfulDeployments && $hasNonAutomaticDeployments;
     }
 
     /**
@@ -295,8 +292,6 @@ class SchemaDeployer
      */
     public static function main()
     {
-        ExecutionLock::preventConcurrentExecution();
-
         Logger::log("Starting deployment");
 
         self::initializeDirectories();
@@ -311,17 +306,8 @@ class SchemaDeployer
 
         Logger::log("Found " . count($schemas) . " schemas");
 
-        $needsNginxReload = false;
-
         foreach ($schemas as $schema) {
-            try {
-                $schemaTriggeredReload = self::processSchema($schemas, $schema, $previousState);
-                if ($schemaTriggeredReload) {
-                    $needsNginxReload = true;
-                }
-            } catch (Throwable $e) {
-                Logger::log("Error processing schema " . ($schema['name'] ?? '-') . ": " . $e->getMessage());
-            }
+            self::processSchema($schemas, $schema, $previousState);
         }
 
         StateManager::save($previousState);
