@@ -277,12 +277,6 @@ class DomainManager
         exec("find /usr/local/hestia/data/users/ -name '*.conf' -exec sed -i '/^$/d' {} \\;");
         Logger::log("Empty lines cleaned from configs");
 
-        // 10. Перезапускаем все сервисы
-        exec("systemctl reload apache2 2>/dev/null");
-        exec("systemctl reload nginx 2>/dev/null");
-        exec("systemctl restart hestia 2>/dev/null");
-        Logger::log("All services restarted");
-
         Logger::log("System-wide cleanup completed for: $domain");
         sleep(3);
     }

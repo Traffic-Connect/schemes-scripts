@@ -194,7 +194,7 @@ class SchemaDeployer
         $output = [];
         $returnCode = 0;
 
-        exec('systemctl restart nginx 2>&1', $output, $returnCode);
+        exec('v-restart-web 2>&1', $output, $returnCode);
 
         if ($returnCode === 0) {
             Logger::log("Nginx reloaded successfully");
@@ -311,6 +311,12 @@ class SchemaDeployer
         }
 
         StateManager::save($previousState);
+
+        if ($needsNginxReload) {
+            sleep(3);
+            self::reloadNginx();
+        }
+
         Logger::log("Deployment completed");
     }
 }
