@@ -18,12 +18,13 @@ fi
 # Пути и переменные БД
 WEB_PATH="/home/$USER/web/$DOMAIN/public_html"
 
-# Создаем КОРОТКИЕ имена для БД
-DOMAIN_SHORT=$(echo "$DOMAIN" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-20)
-DB_NAME="${DOMAIN_SHORT}_wp"
+# Создаем КОРОТКИЕ имена для БД с уникальным префиксом
+DOMAIN_SHORT=$(echo "$DOMAIN" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-15)
+TIMESTAMP=$(date +%s | tail -c 4)  # Последние 3 цифры timestamp
+DB_NAME="${DOMAIN_SHORT}_${TIMESTAMP}_wp"
 
 # Создаем ОЧЕНЬ КОРОТКОЕ имя пользователя БД
-DOMAIN_HASH=$(echo "$DOMAIN" | md5sum | cut -c1-8)
+DOMAIN_HASH=$(echo "$DOMAIN$TIMESTAMP" | md5sum | cut -c1-8)
 DB_USER="wp${DOMAIN_HASH}"
 
 # Генерируем отдельный пароль для БД
@@ -183,12 +184,40 @@ echo "Final DB User: $DB_USER (${#DB_USER} chars)" >> "$LOG_FILE"
 
 DB_CREATE_RESULT=$(execute_hestia_cmd v-add-database "$USER" "$DB_NAME" "$DB_USER" "$DB_PASS" "mysql" 2>&1)
 if [ $? -ne 0 ]; then
-    echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT" >> "$LOG_FILE"
-    echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT"
-    exit 1
+    # Проверяем, говорит ли что БД уже существует
+    if echo "$DB_CREATE_RESULT" | grep -q "already exists"; then
+        echo "Database $DB_NAME already exists, will clean and use it" >> "$LOG_FILE"
+        
+        # Пробуем подключиться к существующей БД и очистить её
+        echo "Attempting to clean existing database..." >> "$LOG_FILE"
+        
+        # Создаем нового пользователя для существующей БД
+        execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';" >/dev/null 2>&1
+        execute_mysql "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';" >/dev/null 2>&1
+        execute_mysql "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';" >/dev/null 2>&1
+        execute_mysql "FLUSH PRIVILEGES;" >/dev/null 2>&1
+        
+        # Очищаем все таблицы в БД
+        TABLES=$(mysql -u "$DB_USER" -p"$DB_PASS" -h localhost "$DB_NAME" -e "SHOW TABLES;" 2>/dev/null | grep -v "Tables_in_" | tr '\n' ' ')
+        if [ -n "$TABLES" ]; then
+            for table in $TABLES; do
+                if [ -n "$table" ]; then
+                    echo "Dropping table: $table" >> "$LOG_FILE"
+                    mysql -u "$DB_USER" -p"$DB_PASS" -h localhost "$DB_NAME" -e "DROP TABLE IF EXISTS \`$table\`;" >/dev/null 2>&1
+                fi
+            done
+            echo "Existing database cleaned successfully" >> "$LOG_FILE"
+        fi
+        
+        echo "Database prepared successfully" >> "$LOG_FILE"
+    else
+        echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT" >> "$LOG_FILE"
+        echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT"
+        exit 1
+    fi
+else
+    echo "Database created successfully via HestiaCP" >> "$LOG_FILE"
 fi
-
-echo "Database created successfully via HestiaCP" >> "$LOG_FILE"
 
 # Тест подключения к БД
 echo "Testing database connection..." >> "$LOG_FILE"
