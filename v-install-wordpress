@@ -183,6 +183,19 @@ if ! execute_mysql "FLUSH PRIVILEGES;"; then
     exit 1
 fi
 
+# Добавляем созданную БД в панель HestiaCP
+echo "Adding database to HestiaCP panel..." >> "$LOG_FILE"
+CURRENT_TIME=$(date +%T)
+CURRENT_DATE=$(date +%F)
+
+# Добавляем запись в конфиг пользователя
+echo "DB='$DB_NAME' USER='$DB_USER' PASSWORD='$DB_PASS' TYPE='mysql' HOST='localhost' CHARSET='utf8mb4' U_DISK='0' SUSPENDED='no' TIME='$CURRENT_TIME' DATE='$CURRENT_DATE'" >> /usr/local/hestia/data/users/$USER/db.conf
+
+# Пересчитываем статистику пользователя
+/usr/local/hestia/bin/v-update-user-stats "$USER" >/dev/null 2>&1
+
+echo "Database added to HestiaCP panel successfully" >> "$LOG_FILE"
+
 # Скачивание WordPress
 echo "Downloading WordPress..." >> "$LOG_FILE"
 sudo -u "$USER" wp core download --allow-root >/dev/null 2>&1 || {
@@ -364,3 +377,4 @@ echo "WordPress installation completed successfully for $DOMAIN" >> "$LOG_FILE"
 
 # Простой ответ OK
 echo "OK"
+exit 0
