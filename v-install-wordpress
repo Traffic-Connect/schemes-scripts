@@ -18,18 +18,13 @@ fi
 # Пути и переменные БД
 WEB_PATH="/home/$USER/web/$DOMAIN/public_html"
 
-# Создаем безопасное имя для БД из домена (убираем точки и спецсимволы, ограничиваем длину)
-DB_SAFE_NAME=$(echo "$DOMAIN" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-32)
-DB_NAME="${DB_SAFE_NAME}_wp"
+# Создаем КОРОТКИЕ имена для БД
+DOMAIN_SHORT=$(echo "$DOMAIN" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-20)
+DB_NAME="${DOMAIN_SHORT}_wp"
 
-# Создаем короткое уникальное имя пользователя с хешем
-DOMAIN_HASH=$(echo "$DOMAIN" | md5sum | cut -c1-6)
-DB_USER="wp_${DOMAIN_HASH}_user"
-
-# Если все еще слишком длинное (что не должно быть), используем только хеш
-if [ ${#DB_USER} -gt 32 ]; then
-    DB_USER="wp_${DOMAIN_HASH}"
-fi
+# Создаем ОЧЕНЬ КОРОТКОЕ имя пользователя БД
+DOMAIN_HASH=$(echo "$DOMAIN" | md5sum | cut -c1-8)
+DB_USER="wp${DOMAIN_HASH}"
 
 # Генерируем отдельный пароль для БД
 DB_PASS=$(openssl rand -base64 16 | tr -d '/+=' | cut -c1-12)
@@ -137,7 +132,6 @@ echo "Setting proxy template tc-nginx-only for domain $DOMAIN..." >> "$LOG_FILE"
 PROXY_RESULT=$(execute_hestia_cmd v-change-web-domain-proxy-tpl "$USER" "$DOMAIN" "tc-nginx-only")
 if [ $? -ne 0 ]; then
     echo "Warning: Failed to set proxy template tc-nginx-only: $PROXY_RESULT" >> "$LOG_FILE"
-    echo "Warning: Continuing without proxy template..." >> "$LOG_FILE"
 else
     echo "Proxy template tc-nginx-only set successfully" >> "$LOG_FILE"
 fi
@@ -158,124 +152,96 @@ fi
 # Переходим в директорию
 cd "$WEB_PATH" || { echo "Error: Cannot change to $WEB_PATH"; exit 1; }
 
-# Удаляем все файлы в директории (включая существующий WordPress если есть)
+# Удаляем все файлы в директории
 echo "Cleaning directory $WEB_PATH..." >> "$LOG_FILE"
 rm -rf "$WEB_PATH"/*
 rm -rf "$WEB_PATH"/.*  2>/dev/null || true
 
-# Удаляем существующую БД если есть
+# ТОТАЛЬНАЯ ОЧИСТКА БД
 echo "Cleaning existing database $DB_NAME..." >> "$LOG_FILE"
+echo "DB will be: $DB_NAME, User will be: $DB_USER" >> "$LOG_FILE"
 
 # Проверяем у всех пользователей HestiaCP
 USERS_LIST=$(execute_hestia_cmd v-list-users json | jq -r 'keys[]' 2>/dev/null)
 for check_user in $USERS_LIST; do
     if [ -n "$check_user" ]; then
-        DB_CHECK=$(execute_hestia_cmd v-list-database "$check_user" "$DB_NAME" json 2>/dev/null)
-        if [ $? -eq 0 ] && [ -n "$DB_CHECK" ]; then
-            echo "Found database $DB_NAME at user $check_user, removing..." >> "$LOG_FILE"
-            execute_hestia_cmd v-delete-database "$check_user" "$DB_NAME" >/dev/null 2>&1
-        fi
+        execute_hestia_cmd v-delete-database "$check_user" "$DB_NAME" >/dev/null 2>&1
     fi
 done
 
-# Удаляем через прямой MySQL на всякий случай
+# Удаляем через прямой MySQL
 execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;" >/dev/null 2>&1
 execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';" >/dev/null 2>&1
 execute_mysql "FLUSH PRIVILEGES;" >/dev/null 2>&1
 
-sleep 1 # Небольшая пауза
+sleep 2
 
 # Создание базы данных через HestiaCP
 echo "Creating database $DB_NAME via HestiaCP..." >> "$LOG_FILE"
-echo "DB Name: $DB_NAME (length: ${#DB_NAME})" >> "$LOG_FILE"
-echo "DB User: $DB_USER (length: ${#DB_USER})" >> "$LOG_FILE"
-
-# Проверяем длины имен
-if [ ${#DB_USER} -gt 32 ]; then
-    echo "Error: Database username too long (${#DB_USER} chars): $DB_USER"
-    echo "Error: Database username too long (${#DB_USER} chars): $DB_USER" >> "$LOG_FILE"
-    exit 1
-fi
-
-if [ ${#DB_NAME} -gt 64 ]; then
-    echo "Error: Database name too long (${#DB_NAME} chars): $DB_NAME"
-    echo "Error: Database name too long (${#DB_NAME} chars): $DB_NAME" >> "$LOG_FILE"
-    exit 1
-fi
+echo "Final DB Name: $DB_NAME (${#DB_NAME} chars)" >> "$LOG_FILE"
+echo "Final DB User: $DB_USER (${#DB_USER} chars)" >> "$LOG_FILE"
 
 DB_CREATE_RESULT=$(execute_hestia_cmd v-add-database "$USER" "$DB_NAME" "$DB_USER" "$DB_PASS" "mysql" 2>&1)
-DB_CREATE_EXIT_CODE=$?
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT" >> "$LOG_FILE"
+    echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT"
+    exit 1
+fi
 
-echo "Database creation result: $DB_CREATE_RESULT" >> "$LOG_FILE"
-echo "Database creation exit code: $DB_CREATE_EXIT_CODE" >> "$LOG_FILE"
+echo "Database created successfully via HestiaCP" >> "$LOG_FILE"
 
-if [ $DB_CREATE_EXIT_CODE -ne 0 ]; then
-    # Проверяем, говорит ли что БД уже существует
-    if echo "$DB_CREATE_RESULT" | grep -q "already exists"; then
-        echo "Database already exists, removing and recreating via HestiaCP..." >> "$LOG_FILE"
-        
-        # Удаляем старую БД полностью
-        execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
-        execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;" >/dev/null 2>&1
-        execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';" >/dev/null 2>&1
-        execute_mysql "FLUSH PRIVILEGES;" >/dev/null 2>&1
-        
-        sleep 2
-        
-        # Пробуем создать снова
-        DB_CREATE_RESULT2=$(execute_hestia_cmd v-add-database "$USER" "$DB_NAME" "$DB_USER" "$DB_PASS" "mysql" 2>&1)
-        if [ $? -ne 0 ]; then
-            echo "Error: Failed to recreate database via HestiaCP: $DB_CREATE_RESULT2" >> "$LOG_FILE"
-            echo "Error: Failed to create database via HestiaCP after cleanup"
-            exit 1
-        else
-            echo "Database recreated successfully via HestiaCP" >> "$LOG_FILE"
-        fi
-    else
-        echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT" >> "$LOG_FILE"
-        echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT"
-        exit 1
-    fi
-else
-    echo "Database $DB_NAME created successfully via HestiaCP" >> "$LOG_FILE"
+# Тест подключения к БД
+echo "Testing database connection..." >> "$LOG_FILE"
+DB_TEST=$(mysql -u "$DB_USER" -p"$DB_PASS" -h localhost -e "SELECT 1;" "$DB_NAME" 2>&1)
+if [ $? -ne 0 ]; then
+    echo "Error: Database connection failed: $DB_TEST" >> "$LOG_FILE"
+    echo "Error: Database connection failed"
+    exit 1
 fi
 
 # Скачивание WordPress
 echo "Downloading WordPress..." >> "$LOG_FILE"
-sudo -u "$USER" wp core download --allow-root >/dev/null 2>&1 || {
+WP_DOWNLOAD_RESULT=$(sudo -u "$USER" wp core download --allow-root --path="$WEB_PATH" 2>&1)
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to download WordPress: $WP_DOWNLOAD_RESULT" >> "$LOG_FILE"
     echo "Error: Failed to download WordPress"
-    # Очистка БД при ошибке
-    execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
-    execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;"
-    execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';"
     exit 1
-}
+fi
 
-# Создание конфига
+# Создание конфига с подробным логированием
 echo "Creating wp-config.php..." >> "$LOG_FILE"
-sudo -u "$USER" wp config create \
+echo "Config will use: DB=$DB_NAME, User=$DB_USER, Pass=[HIDDEN]" >> "$LOG_FILE"
+
+# Проверяем права на директорию
+if [ ! -w "$WEB_PATH" ]; then
+    echo "No write permissions to $WEB_PATH, fixing..." >> "$LOG_FILE"
+    chown -R "$USER":"$USER" "$WEB_PATH"
+    chmod 755 "$WEB_PATH"
+fi
+
+# Создаем конфиг
+WP_CONFIG_RESULT=$(sudo -u "$USER" wp config create \
     --dbname="$DB_NAME" \
     --dbuser="$DB_USER" \
     --dbpass="$DB_PASS" \
     --dbhost="localhost" \
     --dbprefix="wp_" \
-    --allow-root >/dev/null 2>&1 || {
+    --allow-root --path="$WEB_PATH" 2>&1)
+
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to create wp-config.php: $WP_CONFIG_RESULT" >> "$LOG_FILE"
     echo "Error: Failed to create wp-config.php"
-    # Очистка при ошибке
-    rm -rf "$WEB_PATH"/*
-    execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
-    execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;"
-    execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';"
     exit 1
-}
+fi
+
+echo "wp-config.php created successfully" >> "$LOG_FILE"
 
 # Добавляем дополнительные настройки в wp-config.php
-sudo -u "$USER" wp config set WP_DEBUG false --raw --allow-root >/dev/null 2>&1
-sudo -u "$USER" wp config set WP_DEBUG_LOG false --raw --allow-root >/dev/null 2>&1
-sudo -u "$USER" wp config set WP_DEBUG_DISPLAY false --raw --allow-root >/dev/null 2>&1
-sudo -u "$USER" wp config set DISALLOW_FILE_EDIT true --raw --allow-root >/dev/null 2>&1
-sudo -u "$USER" wp config set AUTOMATIC_UPDATER_DISABLED true --raw --allow-root >/dev/null 2>&1
-
+sudo -u "$USER" wp config set WP_DEBUG false --raw --allow-root --path="$WEB_PATH" >/dev/null 2>&1
+sudo -u "$USER" wp config set WP_DEBUG_LOG false --raw --allow-root --path="$WEB_PATH" >/dev/null 2>&1
+sudo -u "$USER" wp config set WP_DEBUG_DISPLAY false --raw --allow-root --path="$WEB_PATH" >/dev/null 2>&1
+sudo -u "$USER" wp config set DISALLOW_FILE_EDIT true --raw --allow-root --path="$WEB_PATH" >/dev/null 2>&1
+sudo -u "$USER" wp config set AUTOMATIC_UPDATER_DISABLED true --raw --allow-root --path="$WEB_PATH" >/dev/null 2>&1
 
 # Добавляем поддержку HTTPS через прокси
 sudo -u "$USER" sed -i '/\/\* That'"'"'s all, stop editing!/i\
@@ -287,119 +253,89 @@ if (isset($_SERVER['\''HTTP_X_FORWARDED_PROTO'\'']) && $_SERVER['\''HTTP_X_FORWA
 
 # Установка WordPress
 echo "Installing WordPress..." >> "$LOG_FILE"
-sudo -u "$USER" wp core install \
+WP_INSTALL_RESULT=$(sudo -u "$USER" wp core install \
     --url="https://$DOMAIN" \
     --title="$TITLE" \
     --admin_user="$ADMIN_USER" \
     --admin_password="$ADMIN_PASS" \
     --admin_email="$ADMIN_EMAIL" \
     --skip-email \
-    --allow-root >/dev/null 2>&1 || {
+    --allow-root --path="$WEB_PATH" 2>&1)
+
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to install WordPress: $WP_INSTALL_RESULT" >> "$LOG_FILE"
     echo "Error: Failed to install WordPress"
-    # Очистка при ошибке
-    rm -rf "$WEB_PATH"/*
-    execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
-    execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;"
-    execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';"
     exit 1
-}
+fi
+
+echo "WordPress installed successfully" >> "$LOG_FILE"
 
 # Установка базовых настроек
 echo "Configuring WordPress settings..." >> "$LOG_FILE"
-sudo -u "$USER" wp option update timezone_string 'Europe/Kiev' --allow-root >/dev/null 2>&1
-sudo -u "$USER" wp option update date_format 'd.m.Y' --allow-root >/dev/null 2>&1
-sudo -u "$USER" wp option update time_format 'H:i' --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp option update timezone_string 'Europe/Kiev' --allow-root --path="$WEB_PATH" >/dev/null 2>&1
+sudo -u "$USER" wp option update date_format 'd.m.Y' --allow-root --path="$WEB_PATH" >/dev/null 2>&1
+sudo -u "$USER" wp option update time_format 'H:i' --allow-root --path="$WEB_PATH" >/dev/null 2>&1
 
-# Устанавливаем структуру постоянных ссылок на "Post name" (/%postname%/)
-echo "Setting permalink structure to Post name..." >> "$LOG_FILE"
-sudo -u "$USER" wp rewrite structure '/%postname%/' --allow-root >/dev/null 2>&1
-sudo -u "$USER" wp rewrite flush --allow-root >/dev/null 2>&1
+# Устанавливаем структуру постоянных ссылок
+echo "Setting permalink structure..." >> "$LOG_FILE"
+sudo -u "$USER" wp rewrite structure '/%postname%/' --allow-root --path="$WEB_PATH" >/dev/null 2>&1
+sudo -u "$USER" wp rewrite flush --allow-root --path="$WEB_PATH" >/dev/null 2>&1
 
 # Удаление демо-контента
-sudo -u "$USER" wp post delete 1 --force --allow-root >/dev/null 2>&1
-sudo -u "$USER" wp post delete 2 --force --allow-root >/dev/null 2>&1
-sudo -u "$USER" wp comment delete 1 --force --allow-root >/dev/null 2>&1
+sudo -u "$USER" wp post delete 1 --force --allow-root --path="$WEB_PATH" >/dev/null 2>&1
+sudo -u "$USER" wp post delete 2 --force --allow-root --path="$WEB_PATH" >/dev/null 2>&1
+sudo -u "$USER" wp comment delete 1 --force --allow-root --path="$WEB_PATH" >/dev/null 2>&1
 
 # Получаем активную тему
-ACTIVE_THEME=$(sudo -u "$USER" wp theme status --allow-root | grep "Active:" | awk '{print $2}' 2>/dev/null)
+ACTIVE_THEME=$(sudo -u "$USER" wp theme status --allow-root --path="$WEB_PATH" | grep "Active:" | awk '{print $2}' 2>/dev/null)
 echo "Active theme: $ACTIVE_THEME" >> "$LOG_FILE"
 
 # Удаляем все неактивные темы
 echo "Removing inactive themes..." >> "$LOG_FILE"
-INSTALLED_THEMES=$(sudo -u "$USER" wp theme list --status=inactive --field=name --allow-root 2>/dev/null)
+INSTALLED_THEMES=$(sudo -u "$USER" wp theme list --status=inactive --field=name --allow-root --path="$WEB_PATH" 2>/dev/null)
 if [ -n "$INSTALLED_THEMES" ]; then
     for theme in $INSTALLED_THEMES; do
         if [ "$theme" != "$ACTIVE_THEME" ]; then
-            echo "Deleting theme: $theme" >> "$LOG_FILE"
-            sudo -u "$USER" wp theme delete "$theme" --allow-root >/dev/null 2>&1
+            sudo -u "$USER" wp theme delete "$theme" --allow-root --path="$WEB_PATH" >/dev/null 2>&1
         fi
     done
-else
-    echo "No inactive themes found" >> "$LOG_FILE"
 fi
 
 # Удаляем все плагины
 echo "Removing all plugins..." >> "$LOG_FILE"
-INSTALLED_PLUGINS=$(sudo -u "$USER" wp plugin list --field=name --allow-root 2>/dev/null)
+INSTALLED_PLUGINS=$(sudo -u "$USER" wp plugin list --field=name --allow-root --path="$WEB_PATH" 2>/dev/null)
 if [ -n "$INSTALLED_PLUGINS" ]; then
     for plugin in $INSTALLED_PLUGINS; do
-        echo "Deleting plugin: $plugin" >> "$LOG_FILE"
-        sudo -u "$USER" wp plugin deactivate "$plugin" --allow-root >/dev/null 2>&1
-        sudo -u "$USER" wp plugin delete "$plugin" --allow-root >/dev/null 2>&1
+        sudo -u "$USER" wp plugin deactivate "$plugin" --allow-root --path="$WEB_PATH" >/dev/null 2>&1
+        sudo -u "$USER" wp plugin delete "$plugin" --allow-root --path="$WEB_PATH" >/dev/null 2>&1
     done
-else
-    echo "No plugins found" >> "$LOG_FILE"
 fi
 
-# Очистка транзиентов и кешей после удаления
-sudo -u "$USER" wp transient delete --all --allow-root >/dev/null 2>&1
-sudo -u "$USER" wp cache flush --allow-root >/dev/null 2>&1
+# Очистка кешей
+sudo -u "$USER" wp transient delete --all --allow-root --path="$WEB_PATH" >/dev/null 2>&1
+sudo -u "$USER" wp cache flush --allow-root --path="$WEB_PATH" >/dev/null 2>&1
 
 # Копирование кастомных плагинов
 CUSTOM_PLUGINS_SOURCE="/root/schemas/wp/plugins"
 PLUGINS_DESTINATION="/home/$USER/web/$DOMAIN/public_html/wp-content/plugins"
 
 if [ -d "$CUSTOM_PLUGINS_SOURCE" ]; then
-    echo "Copying custom plugins from $CUSTOM_PLUGINS_SOURCE..." >> "$LOG_FILE"
-    
-    # Копируем все содержимое папки с плагинами
+    echo "Copying custom plugins..." >> "$LOG_FILE"
     cp -r "$CUSTOM_PLUGINS_SOURCE"/* "$PLUGINS_DESTINATION/" 2>/dev/null
     
     if [ $? -eq 0 ]; then
-        echo "Custom plugins copied successfully" >> "$LOG_FILE"
-        
-        # Устанавливаем правильные права на скопированные плагины
         chown -R "$USER":"$USER" "$PLUGINS_DESTINATION"
         find "$PLUGINS_DESTINATION" -type d -exec chmod 755 {} \;
         find "$PLUGINS_DESTINATION" -type f -exec chmod 644 {} \;
         
-        # Активируем плагин plugin-downloader если он есть
-        if [ -d "$PLUGINS_DESTINATION/plugin-downloader" ]; then
-            echo "Activating plugin-downloader..." >> "$LOG_FILE"
-            sudo -u "$USER" wp plugin activate plugin-downloader --allow-root >/dev/null 2>&1
-            if [ $? -eq 0 ]; then
-                echo "Plugin plugin-downloader activated successfully" >> "$LOG_FILE"
-            else
-                echo "Failed to activate plugin-downloader" >> "$LOG_FILE"
-            fi
-        fi
-        
-        # Активируем все другие плагины из скопированной папки
+        # Активируем плагины
         for plugin_dir in "$PLUGINS_DESTINATION"/*; do
             if [ -d "$plugin_dir" ]; then
                 plugin_name=$(basename "$plugin_dir")
-                if [ "$plugin_name" != "plugin-downloader" ]; then
-                    echo "Activating plugin: $plugin_name" >> "$LOG_FILE"
-                    sudo -u "$USER" wp plugin activate "$plugin_name" --allow-root >/dev/null 2>&1
-                fi
+                sudo -u "$USER" wp plugin activate "$plugin_name" --allow-root --path="$WEB_PATH" >/dev/null 2>&1
             fi
         done
-        
-    else
-        echo "Failed to copy custom plugins" >> "$LOG_FILE"
     fi
-else
-    echo "Custom plugins directory not found at $CUSTOM_PLUGINS_SOURCE" >> "$LOG_FILE"
 fi
 
 # Установка прав доступа
@@ -410,18 +346,16 @@ find "$WEB_PATH" -type f -exec chmod 644 {} \;
 chmod 600 "$WEB_PATH/wp-config.php"
 
 # Финальная проверка установки
-if [ ! -f "wp-config.php" ]; then
+if [ ! -f "$WEB_PATH/wp-config.php" ]; then
     echo "Error: wp-config.php not found after installation"
     exit 1
 fi
 
-if [ ! -d "wp-admin" ]; then
+if [ ! -d "$WEB_PATH/wp-admin" ]; then
     echo "Error: wp-admin directory not found"
     exit 1
 fi
 
 echo "WordPress installation completed successfully for $DOMAIN" >> "$LOG_FILE"
-
-# Простой ответ OK - как в оригинале
 echo "OK"
 exit 0
