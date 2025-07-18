@@ -21,7 +21,15 @@ WEB_PATH="/home/$USER/web/$DOMAIN/public_html"
 # Создаем безопасное имя для БД из домена (убираем точки и спецсимволы, ограничиваем длину)
 DB_SAFE_NAME=$(echo "$DOMAIN" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-32)
 DB_NAME="${DB_SAFE_NAME}_wp"
-DB_USER="${DB_SAFE_NAME}_user"
+
+# Создаем короткое уникальное имя пользователя с хешем
+DOMAIN_HASH=$(echo "$DOMAIN" | md5sum | cut -c1-6)
+DB_USER="wp_${DOMAIN_HASH}_user"
+
+# Если все еще слишком длинное (что не должно быть), используем только хеш
+if [ ${#DB_USER} -gt 32 ]; then
+    DB_USER="wp_${DOMAIN_HASH}"
+fi
 
 # Генерируем отдельный пароль для БД
 DB_PASS=$(openssl rand -base64 16 | tr -d '/+=' | cut -c1-12)
