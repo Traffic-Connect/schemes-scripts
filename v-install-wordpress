@@ -176,10 +176,13 @@ rm -rf "$WEB_PATH"/.*  2>/dev/null || true
 # Простая предварительная очистка БД
 echo "Cleaning existing database $DB_NAME..." >> "$LOG_FILE"
 
+# Удаляем БД напрямую через MySQL сразу
+execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;" >/dev/null 2>&1
+
 # Проверяем, существует ли БД у текущего пользователя
 DB_EXISTS_CHECK=$(execute_hestia_cmd v-list-database "$USER" "$DB_NAME" json 2>/dev/null)
 if [ $? -eq 0 ] && [ -n "$DB_EXISTS_CHECK" ]; then
-    echo "Database $DB_NAME found at current user, will remove and recreate" >> "$LOG_FILE"
+    echo "Database $DB_NAME found at current user, removing via HestiaCP" >> "$LOG_FILE"
     execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
 fi
 
@@ -189,7 +192,23 @@ if [ -n "$EXISTING_USER" ] && [ "$EXISTING_USER" != "$USER" ]; then
     execute_hestia_cmd v-delete-database "$EXISTING_USER" "$DB_NAME" >/dev/null 2>&1
 fi
 
-sleep 2 # Ждем завершения удаления
+# Проверяем и удаляем БД у всех пользователей
+USERS_LIST=$(execute_hestia_cmd v-list-users json | jq -r 'keys[]' 2>/dev/null)
+for check_user in $USERS_LIST; do
+    if [ -n "$check_user" ]; then
+        DB_CHECK=$(execute_hestia_cmd v-list-database "$check_user" "$DB_NAME" json 2>/dev/null)
+        if [ $? -eq 0 ] && [ -n "$DB_CHECK" ]; then
+            echo "Found database $DB_NAME at user $check_user, removing..." >> "$LOG_FILE"
+            execute_hestia_cmd v-delete-database "$check_user" "$DB_NAME" >/dev/null 2>&1
+        fi
+    fi
+done
+
+# Еще раз удаляем через MySQL для гарантии
+execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;" >/dev/null 2>&1
+execute_mysql "FLUSH PRIVILEGES;" >/dev/null 2>&1
+
+sleep 3 # Ждем завершения удаления
 
 # Создание базы данных через HestiaCP
 echo "Creating database $DB_NAME via HestiaCP..." >> "$LOG_FILE"
@@ -220,33 +239,57 @@ echo "Database creation result: $DB_CREATE_RESULT" >> "$LOG_FILE"
 echo "Exit code: $CREATE_EXIT_CODE" >> "$LOG_FILE"
 
 if [ $CREATE_EXIT_CODE -ne 0 ]; then
-    echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT"
-    echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT" >> "$LOG_FILE"
-    
-    # Попробуем создать БД напрямую через MySQL
-    echo "Attempting to create database directly via MySQL..." >> "$LOG_FILE"
-    
-    if execute_mysql "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"; then
-        echo "Database created directly via MySQL" >> "$LOG_FILE"
+    # Проверяем, говорит ли что БД уже существует
+    if echo "$DB_CREATE_RESULT" | grep -q "already exists"; then
+        echo "Database already exists, will use it" >> "$LOG_FILE"
         
-        if execute_mysql "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"; then
-            echo "Database user created directly via MySQL" >> "$LOG_FILE"
+        # Создаем пользователя для существующей БД
+        execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';" >/dev/null 2>&1
+        execute_mysql "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';" >/dev/null 2>&1
+        execute_mysql "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';" >/dev/null 2>&1
+        execute_mysql "FLUSH PRIVILEGES;" >/dev/null 2>&1
+        
+        # Очищаем таблицы в БД
+        TABLES=$(mysql -u "$DB_USER" -p"$DB_PASS" -h localhost "$DB_NAME" -e "SHOW TABLES;" 2>/dev/null | grep -v "Tables_in_" | tr '\n' ' ')
+        if [ -n "$TABLES" ]; then
+            for table in $TABLES; do
+                if [ -n "$table" ]; then
+                    echo "Dropping table: $table" >> "$LOG_FILE"
+                    mysql -u "$DB_USER" -p"$DB_PASS" -h localhost "$DB_NAME" -e "DROP TABLE IF EXISTS \`$table\`;" >/dev/null 2>&1
+                fi
+            done
+        fi
+        
+        echo "Database prepared successfully" >> "$LOG_FILE"
+    else
+        echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT"
+        echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT" >> "$LOG_FILE"
+        
+        # Попробуем создать БД напрямую через MySQL
+        echo "Attempting to create database directly via MySQL..." >> "$LOG_FILE"
+        
+        if execute_mysql "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"; then
+            echo "Database created directly via MySQL" >> "$LOG_FILE"
             
-            if execute_mysql "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';"; then
-                echo "Database privileges granted directly via MySQL" >> "$LOG_FILE"
-                execute_mysql "FLUSH PRIVILEGES;"
-                echo "Database created successfully via direct MySQL" >> "$LOG_FILE"
+            if execute_mysql "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"; then
+                echo "Database user created directly via MySQL" >> "$LOG_FILE"
+                
+                if execute_mysql "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';"; then
+                    echo "Database privileges granted directly via MySQL" >> "$LOG_FILE"
+                    execute_mysql "FLUSH PRIVILEGES;"
+                    echo "Database created successfully via direct MySQL" >> "$LOG_FILE"
+                else
+                    echo "Error: Failed to grant privileges via MySQL"
+                    exit 1
+                fi
             else
-                echo "Error: Failed to grant privileges via MySQL"
+                echo "Error: Failed to create user via MySQL"
                 exit 1
             fi
         else
-            echo "Error: Failed to create user via MySQL"
+            echo "Error: Failed to create database via MySQL"
             exit 1
         fi
-    else
-        echo "Error: Failed to create database via MySQL"
-        exit 1
     fi
 else
     echo "Database $DB_NAME created successfully via HestiaCP" >> "$LOG_FILE"
