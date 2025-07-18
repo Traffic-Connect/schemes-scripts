@@ -219,13 +219,49 @@ else
     echo "Database created successfully via HestiaCP" >> "$LOG_FILE"
 fi
 
-# Тест подключения к БД
+# Тест подключения к БД с несколькими попытками
 echo "Testing database connection..." >> "$LOG_FILE"
-DB_TEST=$(mysql -u "$DB_USER" -p"$DB_PASS" -h localhost -e "SELECT 1;" "$DB_NAME" 2>&1)
-if [ $? -ne 0 ]; then
-    echo "Error: Database connection failed: $DB_TEST" >> "$LOG_FILE"
-    echo "Error: Database connection failed"
-    exit 1
+
+# Ждем активации БД
+sleep 3
+
+DB_CONNECTION_SUCCESS=false
+for attempt in {1..5}; do
+    echo "Connection attempt $attempt..." >> "$LOG_FILE"
+    DB_TEST=$(mysql -u "$DB_USER" -p"$DB_PASS" -h localhost -e "SELECT 1;" "$DB_NAME" 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "Database connection successful on attempt $attempt" >> "$LOG_FILE"
+        DB_CONNECTION_SUCCESS=true
+        break
+    else
+        echo "Connection attempt $attempt failed: $DB_TEST" >> "$LOG_FILE"
+        if [ $attempt -lt 5 ]; then
+            echo "Waiting 2 seconds before retry..." >> "$LOG_FILE"
+            sleep 2
+        fi
+    fi
+done
+
+if [ "$DB_CONNECTION_SUCCESS" = false ]; then
+    echo "Database connection failed after 5 attempts, trying to fix..." >> "$LOG_FILE"
+    
+    # Попробуем пересоздать пользователя БД
+    echo "Recreating database user..." >> "$LOG_FILE"
+    execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';" >/dev/null 2>&1
+    execute_mysql "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';" >/dev/null 2>&1
+    execute_mysql "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';" >/dev/null 2>&1
+    execute_mysql "FLUSH PRIVILEGES;" >/dev/null 2>&1
+    
+    # Еще одна попытка
+    sleep 3
+    DB_TEST_FINAL=$(mysql -u "$DB_USER" -p"$DB_PASS" -h localhost -e "SELECT 1;" "$DB_NAME" 2>&1)
+    if [ $? -ne 0 ]; then
+        echo "Error: Database connection still failed: $DB_TEST_FINAL" >> "$LOG_FILE"
+        echo "Error: Database connection failed"
+        exit 1
+    else
+        echo "Database connection successful after user recreation" >> "$LOG_FILE"
+    fi
 fi
 
 # Скачивание WordPress
@@ -248,6 +284,22 @@ if [ ! -w "$WEB_PATH" ]; then
     chmod 755 "$WEB_PATH"
 fi
 
+# Проверяем, что WordPress файлы существуют
+if [ ! -f "$WEB_PATH/wp-config-sample.php" ]; then
+    echo "Error: wp-config-sample.php not found in $WEB_PATH" >> "$LOG_FILE"
+    echo "Error: WordPress files not found"
+    exit 1
+fi
+
+# Еще один тест БД перед созданием конфига
+echo "Final DB connection test before wp-config..." >> "$LOG_FILE"
+DB_PRE_CONFIG_TEST=$(mysql -u "$DB_USER" -p"$DB_PASS" -h localhost -e "SELECT 1;" "$DB_NAME" 2>&1)
+if [ $? -ne 0 ]; then
+    echo "Error: DB connection failed before wp-config: $DB_PRE_CONFIG_TEST" >> "$LOG_FILE"
+    echo "Error: Database connection failed before wp-config"
+    exit 1
+fi
+
 # Создаем конфиг
 WP_CONFIG_RESULT=$(sudo -u "$USER" wp config create \
     --dbname="$DB_NAME" \
@@ -259,11 +311,28 @@ WP_CONFIG_RESULT=$(sudo -u "$USER" wp config create \
 
 if [ $? -ne 0 ]; then
     echo "Error: Failed to create wp-config.php: $WP_CONFIG_RESULT" >> "$LOG_FILE"
-    echo "Error: Failed to create wp-config.php"
-    exit 1
+    echo "Trying to create wp-config.php manually..." >> "$LOG_FILE"
+    
+    # Создаем wp-config.php вручную
+    sudo -u "$USER" cp "$WEB_PATH/wp-config-sample.php" "$WEB_PATH/wp-config.php"
+    
+    # Заменяем параметры БД
+    sudo -u "$USER" sed -i "s/database_name_here/$DB_NAME/g" "$WEB_PATH/wp-config.php"
+    sudo -u "$USER" sed -i "s/username_here/$DB_USER/g" "$WEB_PATH/wp-config.php"
+    sudo -u "$USER" sed -i "s/password_here/$DB_PASS/g" "$WEB_PATH/wp-config.php"
+    sudo -u "$USER" sed -i "s/localhost/localhost/g" "$WEB_PATH/wp-config.php"
+    
+    # Проверяем что файл создался
+    if [ ! -f "$WEB_PATH/wp-config.php" ]; then
+        echo "Error: Failed to create wp-config.php manually" >> "$LOG_FILE"
+        echo "Error: Failed to create wp-config.php"
+        exit 1
+    fi
+    
+    echo "wp-config.php created manually" >> "$LOG_FILE"
+else
+    echo "wp-config.php created successfully via WP CLI" >> "$LOG_FILE"
 fi
-
-echo "wp-config.php created successfully" >> "$LOG_FILE"
 
 # Добавляем дополнительные настройки в wp-config.php
 sudo -u "$USER" wp config set WP_DEBUG false --raw --allow-root --path="$WEB_PATH" >/dev/null 2>&1
