@@ -19,9 +19,11 @@ fi
 WEB_PATH="/home/$USER/web/$DOMAIN/public_html"
 
 # Создаем безопасное имя для БД из домена (убираем точки и спецсимволы, ограничиваем длину)
-DB_SAFE_NAME=$(echo "$DOMAIN" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-32)
+DB_SAFE_NAME=$(echo "$DOMAIN" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-24)
 DB_NAME="${DB_SAFE_NAME}_wp"
-DB_USER="${DB_SAFE_NAME}_user"
+# MySQL username максимум 32 символа, учитываем "_user" (5 символов)
+DB_USER_SAFE=$(echo "$DOMAIN" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-27)
+DB_USER="${DB_USER_SAFE}_user"
 
 # Генерируем отдельный пароль для БД
 DB_PASS=$(openssl rand -base64 16 | tr -d '/+=' | cut -c1-12)
@@ -164,6 +166,15 @@ execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
 
 # Создание базы данных через HestiaCP
 echo "Creating database $DB_NAME via HestiaCP..." >> "$LOG_FILE"
+echo "DB Name: $DB_NAME (length: ${#DB_NAME})" >> "$LOG_FILE"
+echo "DB User: $DB_USER (length: ${#DB_USER})" >> "$LOG_FILE"
+
+# Проверяем длину имени пользователя БД
+if [ ${#DB_USER} -gt 32 ]; then
+    echo "Error: Database username too long (${#DB_USER} chars): $DB_USER"
+    exit 1
+fi
+
 DB_CREATE_RESULT=$(execute_hestia_cmd v-add-database "$USER" "$DB_NAME" "$DB_USER" "$DB_PASS" "mysql")
 if [ $? -ne 0 ]; then
     echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT"
