@@ -29,9 +29,9 @@ if [ ${#DB_NAME} -gt 40 ]; then
     DB_NAME="${DB_SAFE_NAME}_wp"
 fi
 
-# Создаем короткое уникальное имя пользователя
-DOMAIN_HASH=$(echo "$DOMAIN" | md5sum | cut -c1-8)
-DB_USER="wp_${DOMAIN_HASH}"
+# Создаем уникальное имя пользователя каждый раз (с временной меткой)
+TIMESTAMP=$(date +%s | tail -c 6) # Последние 5 цифр timestamp
+DB_USER="wp_${TIMESTAMP}"
 
 # Убеждаемся, что имя пользователя не превышает 32 символа
 if [ ${#DB_USER} -gt 32 ]; then
@@ -176,6 +176,9 @@ rm -rf "$WEB_PATH"/.*  2>/dev/null || true
 # Удаляем существующую БД через HestiaCP если есть
 echo "Cleaning existing database $DB_NAME..." >> "$LOG_FILE"
 
+# Также очищаем пользователя БД из предыдущих установок
+echo "Cleaning existing database user $DB_USER..." >> "$LOG_FILE"
+
 # Сначала пытаемся удалить у текущего пользователя
 execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
 
@@ -183,6 +186,12 @@ execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
 if [ -n "$EXISTING_USER" ] && [ "$EXISTING_USER" != "$USER" ]; then
     echo "Removing database from previous user $EXISTING_USER..." >> "$LOG_FILE"
     execute_hestia_cmd v-delete-database "$EXISTING_USER" "$DB_NAME" >/dev/null 2>&1
+    
+    # Также пробуем удалить с другими возможными именами БД
+    OLD_DB_NAMES=("${EXISTING_USER}_wp" "${EXISTING_USER}_wordpress" "${DB_SAFE_NAME}_wp")
+    for old_db in "${OLD_DB_NAMES[@]}"; do
+        execute_hestia_cmd v-delete-database "$EXISTING_USER" "$old_db" >/dev/null 2>&1
+    done
 fi
 
 # Дополнительно проверяем все пользователи и удаляем БД если найдена
@@ -190,18 +199,64 @@ echo "Checking all users for existing database..." >> "$LOG_FILE"
 USERS_LIST=$(execute_hestia_cmd v-list-users json | jq -r 'keys[]' 2>/dev/null)
 for check_user in $USERS_LIST; do
     if [ -n "$check_user" ]; then
+        # Проверяем текущую БД
         DB_CHECK=$(execute_hestia_cmd v-list-database "$check_user" "$DB_NAME" json 2>/dev/null)
         if [ $? -eq 0 ] && [ -n "$DB_CHECK" ]; then
             echo "Found database $DB_NAME at user $check_user, removing..." >> "$LOG_FILE"
             execute_hestia_cmd v-delete-database "$check_user" "$DB_NAME" >/dev/null 2>&1
         fi
+        
+        # Проверяем возможные старые варианты имен БД для этого домена
+        POSSIBLE_DB_NAMES=(
+            "${check_user}_wp"
+            "${check_user}_wordpress" 
+            "${DB_SAFE_NAME}_wp"
+            "$(echo "$DOMAIN" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-10)_wp"
+            "$(echo "$DOMAIN" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-20)_wp"
+        )
+        
+        for possible_db in "${POSSIBLE_DB_NAMES[@]}"; do
+            if [ "$possible_db" != "$DB_NAME" ]; then
+                execute_hestia_cmd v-delete-database "$check_user" "$possible_db" >/dev/null 2>&1
+            fi
+        done
     fi
 done
 
-# Также удаляем пользователя БД напрямую через MySQL на всякий случай
-echo "Cleaning MySQL user directly..." >> "$LOG_FILE"
-execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;" >/dev/null 2>&1
-execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';" >/dev/null 2>&1
+# Удаляем все возможные варианты пользователей БД напрямую через MySQL
+echo "Cleaning MySQL users directly..." >> "$LOG_FILE"
+
+# Список возможных имен пользователей для удаления
+POSSIBLE_USERS=(
+    "$DB_USER"
+    "wp_$(echo "$DOMAIN" | md5sum | cut -c1-8)"
+    "${DB_SAFE_NAME}_user"
+    "${EXISTING_USER}_user"
+    "$(echo "$DOMAIN" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-27)_user"
+)
+
+for user_to_delete in "${POSSIBLE_USERS[@]}"; do
+    if [ -n "$user_to_delete" ]; then
+        echo "Dropping user: $user_to_delete" >> "$LOG_FILE"
+        execute_mysql "DROP USER IF EXISTS '$user_to_delete'@'localhost';" >/dev/null 2>&1
+    fi
+done
+
+# Удаляем возможные БД
+POSSIBLE_DBS=(
+    "$DB_NAME"
+    "${DB_SAFE_NAME}_wp"
+    "${EXISTING_USER}_wp"
+    "$(echo "$DOMAIN" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-20)_wp"
+)
+
+for db_to_delete in "${POSSIBLE_DBS[@]}"; do
+    if [ -n "$db_to_delete" ]; then
+        echo "Dropping database: $db_to_delete" >> "$LOG_FILE"
+        execute_mysql "DROP DATABASE IF EXISTS \`$db_to_delete\`;" >/dev/null 2>&1
+    fi
+done
+
 execute_mysql "FLUSH PRIVILEGES;" >/dev/null 2>&1
 
 sleep 3 # Ждем завершения удаления
