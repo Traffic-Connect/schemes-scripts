@@ -137,6 +137,15 @@ else
     echo "Proxy template tc-nginx-only set successfully" >> "$LOG_FILE"
 fi
 
+# Устанавливаем прокси-шаблон tc-nginx-only
+echo "Setting proxy template tc-nginx-only for domain $DOMAIN..." >> "$LOG_FILE"
+PROXY_RESULT=$(execute_hestia_cmd v-change-web-domain-proxy-tpl "$USER" "$DOMAIN" "tc-nginx-only")
+if [ $? -ne 0 ]; then
+    echo "Warning: Failed to set proxy template tc-nginx-only: $PROXY_RESULT" >> "$LOG_FILE"
+else
+    echo "Proxy template tc-nginx-only set successfully" >> "$LOG_FILE"
+fi
+
 # Проверяем создание директории
 WEB_PATH="/home/$USER/web/$DOMAIN/public_html"
 if [ ! -d "$WEB_PATH" ]; then
