@@ -157,36 +157,75 @@ rm -rf "$WEB_PATH"/.*  2>/dev/null || true
 
 # Удаляем существующую БД если есть
 echo "Cleaning existing database $DB_NAME..." >> "$LOG_FILE"
-execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
+
+# Проверяем у всех пользователей HestiaCP
+USERS_LIST=$(execute_hestia_cmd v-list-users json | jq -r 'keys[]' 2>/dev/null)
+for check_user in $USERS_LIST; do
+    if [ -n "$check_user" ]; then
+        DB_CHECK=$(execute_hestia_cmd v-list-database "$check_user" "$DB_NAME" json 2>/dev/null)
+        if [ $? -eq 0 ] && [ -n "$DB_CHECK" ]; then
+            echo "Found database $DB_NAME at user $check_user, removing..." >> "$LOG_FILE"
+            execute_hestia_cmd v-delete-database "$check_user" "$DB_NAME" >/dev/null 2>&1
+        fi
+    fi
+done
+
+# Удаляем через прямой MySQL на всякий случай
 execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;" >/dev/null 2>&1
 execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';" >/dev/null 2>&1
+execute_mysql "FLUSH PRIVILEGES;" >/dev/null 2>&1
+
+sleep 1 # Небольшая пауза
 
 # Создание базы данных через HestiaCP
 echo "Creating database $DB_NAME via HestiaCP..." >> "$LOG_FILE"
-DB_CREATE_RESULT=$(execute_hestia_cmd v-add-database "$USER" "$DB_NAME" "$DB_USER" "$DB_PASS" "mysql")
-if [ $? -ne 0 ]; then
-    echo "HestiaCP database creation failed, using direct MySQL..." >> "$LOG_FILE"
-    
-    # Fallback - создание через MySQL
-    if ! execute_mysql "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"; then
-        echo "Error: Failed to create database"
-        exit 1
-    fi
+echo "DB Name: $DB_NAME (length: ${#DB_NAME})" >> "$LOG_FILE"
+echo "DB User: $DB_USER (length: ${#DB_USER})" >> "$LOG_FILE"
 
-    # Создание пользователя БД
-    if ! execute_mysql "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"; then
-        echo "Error: Failed to create database user"
-        exit 1
-    fi
+# Проверяем длины имен
+if [ ${#DB_USER} -gt 32 ]; then
+    echo "Error: Database username too long (${#DB_USER} chars): $DB_USER"
+    echo "Error: Database username too long (${#DB_USER} chars): $DB_USER" >> "$LOG_FILE"
+    exit 1
+fi
 
-    # Выдача прав пользователю
-    if ! execute_mysql "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';"; then
-        echo "Error: Failed to grant privileges"
-        exit 1
-    fi
+if [ ${#DB_NAME} -gt 64 ]; then
+    echo "Error: Database name too long (${#DB_NAME} chars): $DB_NAME"
+    echo "Error: Database name too long (${#DB_NAME} chars): $DB_NAME" >> "$LOG_FILE"
+    exit 1
+fi
 
-    if ! execute_mysql "FLUSH PRIVILEGES;"; then
-        echo "Error: Failed to flush privileges"
+DB_CREATE_RESULT=$(execute_hestia_cmd v-add-database "$USER" "$DB_NAME" "$DB_USER" "$DB_PASS" "mysql" 2>&1)
+DB_CREATE_EXIT_CODE=$?
+
+echo "Database creation result: $DB_CREATE_RESULT" >> "$LOG_FILE"
+echo "Database creation exit code: $DB_CREATE_EXIT_CODE" >> "$LOG_FILE"
+
+if [ $DB_CREATE_EXIT_CODE -ne 0 ]; then
+    # Проверяем, говорит ли что БД уже существует
+    if echo "$DB_CREATE_RESULT" | grep -q "already exists"; then
+        echo "Database already exists, removing and recreating via HestiaCP..." >> "$LOG_FILE"
+        
+        # Удаляем старую БД полностью
+        execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
+        execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;" >/dev/null 2>&1
+        execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';" >/dev/null 2>&1
+        execute_mysql "FLUSH PRIVILEGES;" >/dev/null 2>&1
+        
+        sleep 2
+        
+        # Пробуем создать снова
+        DB_CREATE_RESULT2=$(execute_hestia_cmd v-add-database "$USER" "$DB_NAME" "$DB_USER" "$DB_PASS" "mysql" 2>&1)
+        if [ $? -ne 0 ]; then
+            echo "Error: Failed to recreate database via HestiaCP: $DB_CREATE_RESULT2" >> "$LOG_FILE"
+            echo "Error: Failed to create database via HestiaCP after cleanup"
+            exit 1
+        else
+            echo "Database recreated successfully via HestiaCP" >> "$LOG_FILE"
+        fi
+    else
+        echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT" >> "$LOG_FILE"
+        echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT"
         exit 1
     fi
 else
