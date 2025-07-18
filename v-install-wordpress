@@ -282,27 +282,6 @@ if [ ${#DB_NAME} -gt 64 ]; then
     exit 1
 fi
 
-# Создание базы данных через HestiaCP
-echo "Creating database $DB_NAME via HestiaCP..." >> "$LOG_FILE"
-echo "Domain: $DOMAIN" >> "$LOG_FILE"
-echo "DB Name: $DB_NAME (length: ${#DB_NAME})" >> "$LOG_FILE"
-echo "DB User: $DB_USER (length: ${#DB_USER})" >> "$LOG_FILE"
-echo "DB Pass: [HIDDEN] (length: ${#DB_PASS})" >> "$LOG_FILE"
-
-# Проверяем длину имени пользователя БД
-if [ ${#DB_USER} -gt 32 ]; then
-    echo "Error: Database username too long (${#DB_USER} chars): $DB_USER"
-    echo "Error: Database username too long (${#DB_USER} chars): $DB_USER" >> "$LOG_FILE"
-    exit 1
-fi
-
-# Проверяем длину имени БД
-if [ ${#DB_NAME} -gt 64 ]; then
-    echo "Error: Database name too long (${#DB_NAME} chars): $DB_NAME"
-    echo "Error: Database name too long (${#DB_NAME} chars): $DB_NAME" >> "$LOG_FILE"
-    exit 1
-fi
-
 echo "Executing: v-add-database $USER $DB_NAME $DB_USER [PASSWORD] mysql" >> "$LOG_FILE"
 DB_CREATE_RESULT=$(execute_hestia_cmd v-add-database "$USER" "$DB_NAME" "$DB_USER" "$DB_PASS" "mysql" 2>&1)
 CREATE_EXIT_CODE=$?
@@ -343,15 +322,49 @@ else
     echo "Database $DB_NAME created successfully via HestiaCP" >> "$LOG_FILE"
 fi
 
-# Тестируем подключение к БД
+# Ждем немного чтобы БД активировалась
+sleep 5
+
+# Тестируем подключение к БД (несколько попыток)
 echo "Testing database connection..." >> "$LOG_FILE"
-DB_TEST=$(mysql -u "$DB_USER" -p"$DB_PASS" -h localhost -e "SELECT 1;" "$DB_NAME" 2>&1)
-if [ $? -eq 0 ]; then
-    echo "Database connection successful" >> "$LOG_FILE"
-else
-    echo "Warning: Database connection test failed: $DB_TEST" >> "$LOG_FILE"
-    # Ждем немного, иногда нужно время для активации пользователя
+DB_CONNECTION_SUCCESS=false
+for attempt in {1..5}; do
+    echo "Connection attempt $attempt..." >> "$LOG_FILE"
+    DB_TEST=$(mysql -u "$DB_USER" -p"$DB_PASS" -h localhost -e "SELECT 1;" "$DB_NAME" 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "Database connection successful on attempt $attempt" >> "$LOG_FILE"
+        DB_CONNECTION_SUCCESS=true
+        break
+    else
+        echo "Connection attempt $attempt failed: $DB_TEST" >> "$LOG_FILE"
+        if [ $attempt -lt 5 ]; then
+            echo "Waiting 3 seconds before retry..." >> "$LOG_FILE"
+            sleep 3
+        fi
+    fi
+done
+
+if [ "$DB_CONNECTION_SUCCESS" = false ]; then
+    echo "Error: Database connection failed after 5 attempts"
+    echo "Error: Database connection failed after 5 attempts" >> "$LOG_FILE"
+    echo "Final error: $DB_TEST" >> "$LOG_FILE"
+    
+    # Попробуем пересоздать пользователя с правами
+    echo "Attempting to recreate database user with permissions..." >> "$LOG_FILE"
+    execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';" >/dev/null 2>&1
+    execute_mysql "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';" >/dev/null 2>&1
+    execute_mysql "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';" >/dev/null 2>&1
+    execute_mysql "FLUSH PRIVILEGES;" >/dev/null 2>&1
+    
+    # Последняя попытка
     sleep 3
+    DB_TEST_FINAL=$(mysql -u "$DB_USER" -p"$DB_PASS" -h localhost -e "SELECT 1;" "$DB_NAME" 2>&1)
+    if [ $? -ne 0 ]; then
+        echo "Error: Database connection still failed after recreating user: $DB_TEST_FINAL"
+        exit 1
+    else
+        echo "Database connection successful after recreating user" >> "$LOG_FILE"
+    fi
 fi
 
 # Скачивание WordPress
@@ -384,6 +397,15 @@ fi
 # Убеждаемся, что WordPress файлы существуют
 if [ ! -f "$WEB_PATH/wp-config-sample.php" ]; then
     echo "Error: WordPress files not found in $WEB_PATH" >> "$LOG_FILE"
+    exit 1
+fi
+
+# Проверяем подключение к БД еще раз перед созданием конфига
+echo "Final database connection test before wp-config creation..." >> "$LOG_FILE"
+DB_FINAL_TEST=$(mysql -u "$DB_USER" -p"$DB_PASS" -h localhost -e "SELECT 1;" "$DB_NAME" 2>&1)
+if [ $? -ne 0 ]; then
+    echo "Error: Database connection failed before wp-config creation: $DB_FINAL_TEST" >> "$LOG_FILE"
+    echo "Error: Database connection failed before wp-config creation"
     exit 1
 fi
 
@@ -429,6 +451,14 @@ if [ $? -ne 0 ]; then
     
     echo "wp-config.php created manually" >> "$LOG_FILE"
 fi
+
+# Проверяем, что wp-config.php создался корректно
+if [ ! -f "$WEB_PATH/wp-config.php" ]; then
+    echo "Error: wp-config.php not found after creation" >> "$LOG_FILE"
+    exit 1
+fi
+
+echo "wp-config.php created successfully" >> "$LOG_FILE"
 
 # Добавляем дополнительные настройки в wp-config.php
 sudo -u "$USER" wp config set WP_DEBUG false --raw --allow-root >/dev/null 2>&1
