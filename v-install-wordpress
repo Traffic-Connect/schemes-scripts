@@ -191,8 +191,12 @@ CURRENT_DATE=$(date +%F)
 # Добавляем запись в конфиг пользователя
 echo "DB='$DB_NAME' USER='$DB_USER' PASSWORD='$DB_PASS' TYPE='mysql' HOST='localhost' CHARSET='utf8mb4' U_DISK='0' SUSPENDED='no' TIME='$CURRENT_TIME' DATE='$CURRENT_DATE'" >> /usr/local/hestia/data/users/$USER/db.conf
 
-# Пересчитываем статистику пользователя
+# Пересчитываем статистику пользователя и обновляем счетчики
 /usr/local/hestia/bin/v-update-user-stats "$USER" >/dev/null 2>&1
+/usr/local/hestia/bin/v-update-user-counters "$USER" >/dev/null 2>&1
+
+# Обновляем общую статистику системы
+/usr/local/hestia/bin/v-update-sys-queue stats >/dev/null 2>&1
 
 echo "Database added to HestiaCP panel successfully" >> "$LOG_FILE"
 
