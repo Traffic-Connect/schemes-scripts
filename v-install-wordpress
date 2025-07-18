@@ -19,13 +19,13 @@ fi
 WEB_PATH="/home/$USER/web/$DOMAIN/public_html"
 
 # Создаем безопасное имя для БД из домена (убираем точки и спецсимволы, ограничиваем длину)
-# Используем только первые 15 символов домена для очень короткого имени БД
-DB_SAFE_NAME=$(echo "$DOMAIN" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-15)
+# MySQL database name максимум 64 символа, оставляем запас
+DB_SAFE_NAME=$(echo "$DOMAIN" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-60)
 DB_NAME="${DB_SAFE_NAME}_wp"
 
-# Если имя БД все еще слишком длинное, делаем его еще короче
-if [ ${#DB_NAME} -gt 40 ]; then
-    DB_SAFE_NAME=$(echo "$DOMAIN" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-10)
+# Если имя БД все еще слишком длинное, обрезаем еще больше
+if [ ${#DB_NAME} -gt 64 ]; then
+    DB_SAFE_NAME=$(echo "$DOMAIN" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-56)
     DB_NAME="${DB_SAFE_NAME}_wp"
 fi
 
@@ -173,40 +173,14 @@ echo "Cleaning directory $WEB_PATH..." >> "$LOG_FILE"
 rm -rf "$WEB_PATH"/*
 rm -rf "$WEB_PATH"/.*  2>/dev/null || true
 
-# Удаляем существующую БД через HestiaCP если есть
+# Простая предварительная очистка
 echo "Cleaning existing database $DB_NAME..." >> "$LOG_FILE"
 
-# Проверяем, существует ли БД у текущего пользователя и очищаем её
+# Проверяем, существует ли БД у текущего пользователя
 DB_EXISTS_CHECK=$(execute_hestia_cmd v-list-database "$USER" "$DB_NAME" json 2>/dev/null)
 if [ $? -eq 0 ] && [ -n "$DB_EXISTS_CHECK" ]; then
-    echo "Database $DB_NAME found, cleaning tables..." >> "$LOG_FILE"
-    
-    # Получаем данные БД из HestiaCP для подключения
-    DB_INFO=$(echo "$DB_EXISTS_CHECK" | jq -r ".[\"$DB_NAME\"]" 2>/dev/null)
-    if [ -n "$DB_INFO" ] && [ "$DB_INFO" != "null" ]; then
-        EXISTING_DB_USER=$(echo "$DB_INFO" | jq -r '.U' 2>/dev/null)
-        EXISTING_DB_PASS=$(echo "$DB_INFO" | jq -r '.PASS' 2>/dev/null)
-        
-        if [ -n "$EXISTING_DB_USER" ] && [ "$EXISTING_DB_USER" != "null" ]; then
-            echo "Found existing DB user: $EXISTING_DB_USER" >> "$LOG_FILE"
-            
-            # Очищаем таблицы существующей БД
-            TABLES=$(mysql -u "$EXISTING_DB_USER" -p"$EXISTING_DB_PASS" -h localhost "$DB_NAME" -e "SHOW TABLES;" 2>/dev/null | grep -v "Tables_in_" | tr '\n' ' ')
-            
-            if [ -n "$TABLES" ]; then
-                for table in $TABLES; do
-                    if [ -n "$table" ]; then
-                        echo "Dropping table: $table" >> "$LOG_FILE"
-                        mysql -u "$EXISTING_DB_USER" -p"$EXISTING_DB_PASS" -h localhost "$DB_NAME" -e "DROP TABLE IF EXISTS \`$table\`;" >/dev/null 2>&1
-                    fi
-                done
-                echo "Existing database cleaned successfully" >> "$LOG_FILE"
-            fi
-            
-            # Удаляем старого пользователя БД
-            execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
-        fi
-    fi
+    echo "Database $DB_NAME found at current user, will remove and recreate" >> "$LOG_FILE"
+    execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
 fi
 
 # Если домен был у другого пользователя, удаляем БД и у него
@@ -214,10 +188,6 @@ if [ -n "$EXISTING_USER" ] && [ "$EXISTING_USER" != "$USER" ]; then
     echo "Removing database from previous user $EXISTING_USER..." >> "$LOG_FILE"
     execute_hestia_cmd v-delete-database "$EXISTING_USER" "$DB_NAME" >/dev/null 2>&1
 fi
-
-# Простая очистка через MySQL на всякий случай
-execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;" >/dev/null 2>&1
-execute_mysql "FLUSH PRIVILEGES;" >/dev/null 2>&1
 
 sleep 2 # Ждем завершения удаления
 
@@ -254,29 +224,50 @@ if [ $CREATE_EXIT_CODE -ne 0 ]; then
     if echo "$DB_CREATE_RESULT" | grep -q "already exists"; then
         echo "Database already exists, will clean and reuse it" >> "$LOG_FILE"
         
-        # Очищаем существующую БД
-        echo "Cleaning existing database tables..." >> "$LOG_FILE"
-        TABLES=$(mysql -u "$DB_USER" -p"$DB_PASS" -h localhost "$DB_NAME" -e "SHOW TABLES;" 2>/dev/null | grep -v "Tables_in_" | tr '\n' ' ')
-        
-        if [ -n "$TABLES" ]; then
-            for table in $TABLES; do
-                if [ -n "$table" ]; then
-                    echo "Dropping table: $table" >> "$LOG_FILE"
-                    mysql -u "$DB_USER" -p"$DB_PASS" -h localhost "$DB_NAME" -e "DROP TABLE IF EXISTS \`$table\`;" >/dev/null 2>&1
+        # Сначала проверяем, существует ли БД вообще
+        DB_EXISTS_CHECK=$(mysql -u root -e "SHOW DATABASES LIKE '$DB_NAME';" 2>/dev/null | grep "$DB_NAME")
+        if [ -n "$DB_EXISTS_CHECK" ]; then
+            echo "Database exists, attempting to connect and clean..." >> "$LOG_FILE"
+            
+            # Очищаем существующую БД (пробуем с разными пользователями)
+            echo "Cleaning existing database tables..." >> "$LOG_FILE"
+            
+            # Пробуем подключиться с новым пользователем
+            TABLES=$(mysql -u "$DB_USER" -p"$DB_PASS" -h localhost "$DB_NAME" -e "SHOW TABLES;" 2>/dev/null | grep -v "Tables_in_" | tr '\n' ' ')
+            
+            if [ $? -eq 0 ] && [ -n "$TABLES" ]; then
+                # Удачно подключились с новым пользователем
+                for table in $TABLES; do
+                    if [ -n "$table" ]; then
+                        echo "Dropping table: $table" >> "$LOG_FILE"
+                        mysql -u "$DB_USER" -p"$DB_PASS" -h localhost "$DB_NAME" -e "DROP TABLE IF EXISTS \`$table\`;" >/dev/null 2>&1
+                    fi
+                done
+                echo "Database cleaned successfully with new user" >> "$LOG_FILE"
+            else
+                # Пробуем через root
+                echo "Trying to clean database via root..." >> "$LOG_FILE"
+                TABLES_ROOT=$(execute_mysql "USE \`$DB_NAME\`; SHOW TABLES;" 2>/dev/null | grep -v "Tables_in_" | tr '\n' ' ')
+                if [ -n "$TABLES_ROOT" ]; then
+                    for table in $TABLES_ROOT; do
+                        if [ -n "$table" ]; then
+                            echo "Dropping table via root: $table" >> "$LOG_FILE"
+                            execute_mysql "USE \`$DB_NAME\`; DROP TABLE IF EXISTS \`$table\`;" >/dev/null 2>&1
+                        fi
+                    done
                 fi
-            done
-            echo "Database cleaned successfully" >> "$LOG_FILE"
+                
+                # Создаем пользователя с правами на существующую БД
+                execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';" >/dev/null 2>&1
+                execute_mysql "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';" >/dev/null 2>&1
+                execute_mysql "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';" >/dev/null 2>&1
+                execute_mysql "FLUSH PRIVILEGES;" >/dev/null 2>&1
+                echo "New user created for existing database" >> "$LOG_FILE"
+            fi
         else
-            echo "Database is already empty" >> "$LOG_FILE"
-        fi
-        
-        # Проверяем, что пользователь может подключиться
-        DB_TEST=$(mysql -u "$DB_USER" -p"$DB_PASS" -h localhost -e "SELECT 1;" "$DB_NAME" 2>&1)
-        if [ $? -eq 0 ]; then
-            echo "Database connection successful, using existing database" >> "$LOG_FILE"
-        else
-            echo "Cannot connect with existing user, recreating user..." >> "$LOG_FILE"
-            execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';" >/dev/null 2>&1
+            echo "Database does not actually exist, will create new" >> "$LOG_FILE"
+            # БД не существует, создаем через MySQL
+            execute_mysql "CREATE DATABASE \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" >/dev/null 2>&1
             execute_mysql "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';" >/dev/null 2>&1
             execute_mysql "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';" >/dev/null 2>&1
             execute_mysql "FLUSH PRIVILEGES;" >/dev/null 2>&1
