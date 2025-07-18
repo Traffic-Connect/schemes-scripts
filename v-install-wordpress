@@ -128,7 +128,7 @@ if [ -n "$EXISTING_USER" ]; then
     # Удаляем mail домен если существует
     execute_hestia_cmd v-delete-mail-domain "$EXISTING_USER" "$DOMAIN" >/dev/null 2>&1
 
-    # Удаляем базу данных если существует
+    # Удаляем базу данных если существует через HestiaCP
     execute_hestia_cmd v-delete-database "$EXISTING_USER" "$DB_NAME" >/dev/null 2>&1
 
     sleep 2 # Ждем завершения удаления
@@ -173,7 +173,7 @@ echo "Cleaning directory $WEB_PATH..." >> "$LOG_FILE"
 rm -rf "$WEB_PATH"/*
 rm -rf "$WEB_PATH"/.*  2>/dev/null || true
 
-# Простая предварительная очистка
+# Простая предварительная очистка БД
 echo "Cleaning existing database $DB_NAME..." >> "$LOG_FILE"
 
 # Проверяем, существует ли БД у текущего пользователя
@@ -220,229 +220,62 @@ echo "Database creation result: $DB_CREATE_RESULT" >> "$LOG_FILE"
 echo "Exit code: $CREATE_EXIT_CODE" >> "$LOG_FILE"
 
 if [ $CREATE_EXIT_CODE -ne 0 ]; then
-    # Проверяем, не существует ли уже БД
-    if echo "$DB_CREATE_RESULT" | grep -q "already exists"; then
-        echo "Database already exists, will clean and reuse it" >> "$LOG_FILE"
+    echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT"
+    echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT" >> "$LOG_FILE"
+    
+    # Попробуем создать БД напрямую через MySQL
+    echo "Attempting to create database directly via MySQL..." >> "$LOG_FILE"
+    
+    if execute_mysql "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"; then
+        echo "Database created directly via MySQL" >> "$LOG_FILE"
         
-        # Сначала проверяем, существует ли БД вообще
-        DB_EXISTS_CHECK=$(mysql -u root -e "SHOW DATABASES LIKE '$DB_NAME';" 2>/dev/null | grep "$DB_NAME")
-        if [ -n "$DB_EXISTS_CHECK" ]; then
-            echo "Database exists, attempting to connect and clean..." >> "$LOG_FILE"
+        if execute_mysql "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"; then
+            echo "Database user created directly via MySQL" >> "$LOG_FILE"
             
-            # Очищаем существующую БД (пробуем с разными пользователями)
-            echo "Cleaning existing database tables..." >> "$LOG_FILE"
-            
-            # Пробуем подключиться с новым пользователем
-            TABLES=$(mysql -u "$DB_USER" -p"$DB_PASS" -h localhost "$DB_NAME" -e "SHOW TABLES;" 2>/dev/null | grep -v "Tables_in_" | tr '\n' ' ')
-            
-            if [ $? -eq 0 ] && [ -n "$TABLES" ]; then
-                # Удачно подключились с новым пользователем
-                for table in $TABLES; do
-                    if [ -n "$table" ]; then
-                        echo "Dropping table: $table" >> "$LOG_FILE"
-                        mysql -u "$DB_USER" -p"$DB_PASS" -h localhost "$DB_NAME" -e "DROP TABLE IF EXISTS \`$table\`;" >/dev/null 2>&1
-                    fi
-                done
-                echo "Database cleaned successfully with new user" >> "$LOG_FILE"
+            if execute_mysql "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';"; then
+                echo "Database privileges granted directly via MySQL" >> "$LOG_FILE"
+                execute_mysql "FLUSH PRIVILEGES;"
+                echo "Database created successfully via direct MySQL" >> "$LOG_FILE"
             else
-                # Пробуем через root
-                echo "Trying to clean database via root..." >> "$LOG_FILE"
-                TABLES_ROOT=$(execute_mysql "USE \`$DB_NAME\`; SHOW TABLES;" 2>/dev/null | grep -v "Tables_in_" | tr '\n' ' ')
-                if [ -n "$TABLES_ROOT" ]; then
-                    for table in $TABLES_ROOT; do
-                        if [ -n "$table" ]; then
-                            echo "Dropping table via root: $table" >> "$LOG_FILE"
-                            execute_mysql "USE \`$DB_NAME\`; DROP TABLE IF EXISTS \`$table\`;" >/dev/null 2>&1
-                        fi
-                    done
-                fi
-                
-                # Создаем пользователя с правами на существующую БД
-                execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';" >/dev/null 2>&1
-                execute_mysql "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';" >/dev/null 2>&1
-                execute_mysql "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';" >/dev/null 2>&1
-                execute_mysql "FLUSH PRIVILEGES;" >/dev/null 2>&1
-                echo "New user created for existing database" >> "$LOG_FILE"
-            fi
-        else
-            echo "Database does not actually exist, will create new" >> "$LOG_FILE"
-            # БД не существует, создаем через MySQL
-            execute_mysql "CREATE DATABASE \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" >/dev/null 2>&1
-            execute_mysql "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';" >/dev/null 2>&1
-            execute_mysql "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';" >/dev/null 2>&1
-            execute_mysql "FLUSH PRIVILEGES;" >/dev/null 2>&1
-        fi
-    else
-        echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT"
-        echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT" >> "$LOG_FILE"
-        
-        # Попробуем создать БД напрямую через MySQL
-        echo "Attempting to create database directly via MySQL..." >> "$LOG_FILE"
-        
-        if execute_mysql "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"; then
-            echo "Database created directly via MySQL" >> "$LOG_FILE"
-            
-            if execute_mysql "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"; then
-                echo "Database user created directly via MySQL" >> "$LOG_FILE"
-                
-                if execute_mysql "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';"; then
-                    echo "Database privileges granted directly via MySQL" >> "$LOG_FILE"
-                    execute_mysql "FLUSH PRIVILEGES;"
-                    echo "Database created successfully via direct MySQL" >> "$LOG_FILE"
-                else
-                    echo "Error: Failed to grant privileges via MySQL"
-                    exit 1
-                fi
-            else
-                echo "Error: Failed to create user via MySQL"
+                echo "Error: Failed to grant privileges via MySQL"
                 exit 1
             fi
         else
-            echo "Error: Failed to create database via MySQL"
+            echo "Error: Failed to create user via MySQL"
             exit 1
         fi
+    else
+        echo "Error: Failed to create database via MySQL"
+        exit 1
     fi
 else
     echo "Database $DB_NAME created successfully via HestiaCP" >> "$LOG_FILE"
 fi
 
-# Ждем немного чтобы БД активировалась
-sleep 5
-
-# Тестируем подключение к БД (несколько попыток)
-echo "Testing database connection..." >> "$LOG_FILE"
-DB_CONNECTION_SUCCESS=false
-for attempt in {1..5}; do
-    echo "Connection attempt $attempt..." >> "$LOG_FILE"
-    DB_TEST=$(mysql -u "$DB_USER" -p"$DB_PASS" -h localhost -e "SELECT 1;" "$DB_NAME" 2>&1)
-    if [ $? -eq 0 ]; then
-        echo "Database connection successful on attempt $attempt" >> "$LOG_FILE"
-        DB_CONNECTION_SUCCESS=true
-        break
-    else
-        echo "Connection attempt $attempt failed: $DB_TEST" >> "$LOG_FILE"
-        if [ $attempt -lt 5 ]; then
-            echo "Waiting 3 seconds before retry..." >> "$LOG_FILE"
-            sleep 3
-        fi
-    fi
-done
-
-if [ "$DB_CONNECTION_SUCCESS" = false ]; then
-    echo "Error: Database connection failed after 5 attempts"
-    echo "Error: Database connection failed after 5 attempts" >> "$LOG_FILE"
-    echo "Final error: $DB_TEST" >> "$LOG_FILE"
-    
-    # Попробуем пересоздать пользователя с правами
-    echo "Attempting to recreate database user with permissions..." >> "$LOG_FILE"
-    execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';" >/dev/null 2>&1
-    execute_mysql "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';" >/dev/null 2>&1
-    execute_mysql "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';" >/dev/null 2>&1
-    execute_mysql "FLUSH PRIVILEGES;" >/dev/null 2>&1
-    
-    # Последняя попытка
-    sleep 3
-    DB_TEST_FINAL=$(mysql -u "$DB_USER" -p"$DB_PASS" -h localhost -e "SELECT 1;" "$DB_NAME" 2>&1)
-    if [ $? -ne 0 ]; then
-        echo "Error: Database connection still failed after recreating user: $DB_TEST_FINAL"
-        exit 1
-    else
-        echo "Database connection successful after recreating user" >> "$LOG_FILE"
-    fi
-fi
-
 # Скачивание WordPress
 echo "Downloading WordPress..." >> "$LOG_FILE"
-echo "Working directory: $(pwd)" >> "$LOG_FILE"
-echo "Directory permissions: $(ls -la $WEB_PATH)" >> "$LOG_FILE"
-
-WP_DOWNLOAD_RESULT=$(sudo -u "$USER" wp core download --allow-root --path="$WEB_PATH" 2>&1)
-if [ $? -ne 0 ]; then
-    echo "Error: Failed to download WordPress: $WP_DOWNLOAD_RESULT" >> "$LOG_FILE"
+sudo -u "$USER" wp core download --allow-root >/dev/null 2>&1 || {
     echo "Error: Failed to download WordPress"
     # Очистка БД при ошибке
     execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
     exit 1
-fi
-
-echo "WordPress downloaded successfully" >> "$LOG_FILE"
-echo "Files in directory: $(ls -la $WEB_PATH | head -10)" >> "$LOG_FILE"
+}
 
 # Создание конфига
 echo "Creating wp-config.php..." >> "$LOG_FILE"
-echo "Config params: DB=$DB_NAME, User=$DB_USER, Host=localhost" >> "$LOG_FILE"
-
-# Проверяем, что мы в правильной директории и у нас есть права
-if [ ! -w "$WEB_PATH" ]; then
-    echo "Error: No write permissions to $WEB_PATH" >> "$LOG_FILE"
-    chown -R "$USER":"$USER" "$WEB_PATH"
-fi
-
-# Убеждаемся, что WordPress файлы существуют
-if [ ! -f "$WEB_PATH/wp-config-sample.php" ]; then
-    echo "Error: WordPress files not found in $WEB_PATH" >> "$LOG_FILE"
-    exit 1
-fi
-
-# Проверяем подключение к БД еще раз перед созданием конфига
-echo "Final database connection test before wp-config creation..." >> "$LOG_FILE"
-DB_FINAL_TEST=$(mysql -u "$DB_USER" -p"$DB_PASS" -h localhost -e "SELECT 1;" "$DB_NAME" 2>&1)
-if [ $? -ne 0 ]; then
-    echo "Error: Database connection failed before wp-config creation: $DB_FINAL_TEST" >> "$LOG_FILE"
-    echo "Error: Database connection failed before wp-config creation"
-    exit 1
-fi
-
 sudo -u "$USER" wp config create \
     --dbname="$DB_NAME" \
     --dbuser="$DB_USER" \
     --dbpass="$DB_PASS" \
     --dbhost="localhost" \
     --dbprefix="wp_" \
-    --allow-root --path="$WEB_PATH" 2>&1 | tee -a "$LOG_FILE"
-
-if [ $? -ne 0 ]; then
-    echo "Error: Failed to create wp-config.php" >> "$LOG_FILE"
-    echo "Attempting to create wp-config.php manually..." >> "$LOG_FILE"
-    
-    # Создаем wp-config.php вручную
-    sudo -u "$USER" cp "$WEB_PATH/wp-config-sample.php" "$WEB_PATH/wp-config.php"
-    
-    # Заменяем параметры БД
-    sudo -u "$USER" sed -i "s/database_name_here/$DB_NAME/g" "$WEB_PATH/wp-config.php"
-    sudo -u "$USER" sed -i "s/username_here/$DB_USER/g" "$WEB_PATH/wp-config.php"
-    sudo -u "$USER" sed -i "s/password_here/$DB_PASS/g" "$WEB_PATH/wp-config.php"
-    sudo -u "$USER" sed -i "s/localhost/localhost/g" "$WEB_PATH/wp-config.php"
-    
-    # Генерируем соли
-    SALTS=$(curl -s https://api.wordpress.org/secret-key/1.1/salt/ 2>/dev/null)
-    if [ -n "$SALTS" ]; then
-        # Создаем временный файл с солями
-        echo "$SALTS" > /tmp/wp-salts.tmp
-        # Заменяем соли в конфиге
-        sudo -u "$USER" sed -i '/AUTH_KEY/,/NONCE_SALT/d' "$WEB_PATH/wp-config.php"
-        sudo -u "$USER" sed -i '/\/\*.*auth/r /tmp/wp-salts.tmp' "$WEB_PATH/wp-config.php"
-        rm -f /tmp/wp-salts.tmp
-    fi
-    
-    if [ ! -f "$WEB_PATH/wp-config.php" ]; then
-        echo "Error: Failed to create wp-config.php manually"
-        # Очистка при ошибке
-        rm -rf "$WEB_PATH"/*
-        execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
-        exit 1
-    fi
-    
-    echo "wp-config.php created manually" >> "$LOG_FILE"
-fi
-
-# Проверяем, что wp-config.php создался корректно
-if [ ! -f "$WEB_PATH/wp-config.php" ]; then
-    echo "Error: wp-config.php not found after creation" >> "$LOG_FILE"
+    --allow-root >/dev/null 2>&1 || {
+    echo "Error: Failed to create wp-config.php"
+    # Очистка при ошибке
+    rm -rf "$WEB_PATH"/*
+    execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
     exit 1
-fi
-
-echo "wp-config.php created successfully" >> "$LOG_FILE"
+}
 
 # Добавляем дополнительные настройки в wp-config.php
 sudo -u "$USER" wp config set WP_DEBUG false --raw --allow-root >/dev/null 2>&1
@@ -595,10 +428,6 @@ fi
 
 echo "WordPress installation completed successfully for $DOMAIN" >> "$LOG_FILE"
 
-# Формируем результат
-if [ -n "$EXISTING_USER" ]; then
-    echo "RECREATED_FROM:$EXISTING_USER:OK"
-else
-    echo "OK"
-fi
+# Простой ответ OK - как в старом коде
+echo "OK"
 exit 0
