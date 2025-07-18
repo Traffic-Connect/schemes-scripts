@@ -113,6 +113,9 @@ if [ -n "$EXISTING_USER" ]; then
     # Удаляем mail домен если существует
     execute_hestia_cmd v-delete-mail-domain "$EXISTING_USER" "$DOMAIN" >/dev/null 2>&1
 
+    # Удаляем базу данных если существует
+    execute_hestia_cmd v-delete-database "$EXISTING_USER" "$DB_NAME" >/dev/null 2>&1
+
     sleep 2 # Ждем завершения удаления
 fi
 
@@ -122,6 +125,16 @@ CREATE_RESULT=$(execute_hestia_cmd v-add-web-domain "$USER" "$DOMAIN")
 if [ $? -ne 0 ]; then
     echo "Error: Failed to create domain: $CREATE_RESULT"
     exit 1
+fi
+
+# Устанавливаем прокси-шаблон tc-nginx-only
+echo "Setting proxy template tc-nginx-only for domain $DOMAIN..." >> "$LOG_FILE"
+PROXY_RESULT=$(execute_hestia_cmd v-change-web-domain-proxy-tpl "$USER" "$DOMAIN" "tc-nginx-only")
+if [ $? -ne 0 ]; then
+    echo "Warning: Failed to set proxy template tc-nginx-only: $PROXY_RESULT" >> "$LOG_FILE"
+    echo "Warning: Continuing without proxy template..." >> "$LOG_FILE"
+else
+    echo "Proxy template tc-nginx-only set successfully" >> "$LOG_FILE"
 fi
 
 # Проверяем создание директории
@@ -145,42 +158,26 @@ echo "Cleaning directory $WEB_PATH..." >> "$LOG_FILE"
 rm -rf "$WEB_PATH"/*
 rm -rf "$WEB_PATH"/.*  2>/dev/null || true
 
-# Удаляем существующую БД если есть
+# Удаляем существующую БД через HestiaCP если есть
 echo "Cleaning existing database $DB_NAME..." >> "$LOG_FILE"
-execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;" >/dev/null 2>&1
-execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';" >/dev/null 2>&1
+execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
 
-# Создание базы данных
-echo "Creating database $DB_NAME..." >> "$LOG_FILE"
-if ! execute_mysql "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"; then
-    echo "Error: Failed to create database"
+# Создание базы данных через HestiaCP
+echo "Creating database $DB_NAME via HestiaCP..." >> "$LOG_FILE"
+DB_CREATE_RESULT=$(execute_hestia_cmd v-add-database "$USER" "$DB_NAME" "$DB_USER" "$DB_PASS" "mysql")
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to create database via HestiaCP: $DB_CREATE_RESULT"
     exit 1
 fi
 
-# Создание пользователя БД
-if ! execute_mysql "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"; then
-    echo "Error: Failed to create database user"
-    exit 1
-fi
-
-# Выдача прав пользователю
-if ! execute_mysql "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';"; then
-    echo "Error: Failed to grant privileges"
-    exit 1
-fi
-
-if ! execute_mysql "FLUSH PRIVILEGES;"; then
-    echo "Error: Failed to flush privileges"
-    exit 1
-fi
+echo "Database $DB_NAME created successfully via HestiaCP" >> "$LOG_FILE"
 
 # Скачивание WordPress
 echo "Downloading WordPress..." >> "$LOG_FILE"
 sudo -u "$USER" wp core download --allow-root >/dev/null 2>&1 || {
     echo "Error: Failed to download WordPress"
     # Очистка БД при ошибке
-    execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;"
-    execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';"
+    execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
     exit 1
 }
 
@@ -196,8 +193,7 @@ sudo -u "$USER" wp config create \
     echo "Error: Failed to create wp-config.php"
     # Очистка при ошибке
     rm -rf "$WEB_PATH"/*
-    execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;"
-    execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';"
+    execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
     exit 1
 }
 
@@ -230,8 +226,7 @@ sudo -u "$USER" wp core install \
     echo "Error: Failed to install WordPress"
     # Очистка при ошибке
     rm -rf "$WEB_PATH"/*
-    execute_mysql "DROP DATABASE IF EXISTS \`$DB_NAME\`;"
-    execute_mysql "DROP USER IF EXISTS '$DB_USER'@'localhost';"
+    execute_hestia_cmd v-delete-database "$USER" "$DB_NAME" >/dev/null 2>&1
     exit 1
 }
 
