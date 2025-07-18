@@ -124,6 +124,15 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# Устанавливаем прокси-шаблон tc-nginx-only
+echo "Setting proxy template tc-nginx-only for domain $DOMAIN..." >> "$LOG_FILE"
+PROXY_RESULT=$(execute_hestia_cmd v-change-web-domain-proxy-tpl "$USER" "$DOMAIN" "tc-nginx-only")
+if [ $? -ne 0 ]; then
+    echo "Warning: Failed to set proxy template tc-nginx-only: $PROXY_RESULT" >> "$LOG_FILE"
+else
+    echo "Proxy template tc-nginx-only set successfully" >> "$LOG_FILE"
+fi
+
 # Проверяем создание директории
 WEB_PATH="/home/$USER/web/$DOMAIN/public_html"
 if [ ! -d "$WEB_PATH" ]; then
@@ -173,6 +182,32 @@ if ! execute_mysql "FLUSH PRIVILEGES;"; then
     echo "Error: Failed to flush privileges"
     exit 1
 fi
+
+# Добавляем созданную БД в панель HestiaCP
+echo "Adding database to HestiaCP panel..." >> "$LOG_FILE"
+CURRENT_TIME=$(date +%T)
+CURRENT_DATE=$(date +%F)
+
+# Удаляем старую запись о БД из конфига (если существует)
+if [ -f "/usr/local/hestia/data/users/$USER/db.conf" ]; then
+    # Создаем временный файл без строки с нашей БД
+    grep -v "DB='$DB_NAME'" /usr/local/hestia/data/users/$USER/db.conf > /tmp/db_conf_temp || true
+    # Заменяем оригинальный файл
+    mv /tmp/db_conf_temp /usr/local/hestia/data/users/$USER/db.conf
+    echo "Removed old database entry from config" >> "$LOG_FILE"
+fi
+
+# Добавляем новую запись в конфиг пользователя
+echo "DB='$DB_NAME' USER='$DB_USER' PASSWORD='$DB_PASS' TYPE='mysql' HOST='localhost' CHARSET='utf8mb4' U_DISK='0' SUSPENDED='no' TIME='$CURRENT_TIME' DATE='$CURRENT_DATE'" >> /usr/local/hestia/data/users/$USER/db.conf
+
+# Пересчитываем статистику пользователя и обновляем счетчики
+/usr/local/hestia/bin/v-update-user-stats "$USER" >/dev/null 2>&1
+/usr/local/hestia/bin/v-update-user-counters "$USER" >/dev/null 2>&1
+
+# Обновляем общую статистику системы
+/usr/local/hestia/bin/v-update-sys-queue stats >/dev/null 2>&1
+
+echo "Database added to HestiaCP panel successfully" >> "$LOG_FILE"
 
 # Скачивание WordPress
 echo "Downloading WordPress..." >> "$LOG_FILE"
@@ -353,10 +388,6 @@ fi
 
 echo "WordPress installation completed successfully for $DOMAIN" >> "$LOG_FILE"
 
-# Формируем результат
-if [ -n "$EXISTING_USER" ]; then
-    echo "RECREATED_FROM:$EXISTING_USER:OK"
-else
-    echo "OK"
-fi
+# Простой ответ OK
+echo "OK"
 exit 0
