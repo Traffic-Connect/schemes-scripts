@@ -311,7 +311,7 @@ class DeploymentManager
                                 Logger::log("Extraction successful: $domain");
                             }
 
-                            self::replaceDomainPlaceholder($webRoot, $domain);
+                            self::replaceDomainPlaceholder($webRoot, $originalDomain);
 
                             // Создаем config.php с оригинальным доменом
                             self::createPhpConfig($webRoot, $originalDomain, $user);
