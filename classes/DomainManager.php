@@ -11,10 +11,22 @@ class DomainManager
     {
         $originalDomain = $domain;
         $isWwwDomain = (strpos($domain, 'www.') === 0);
+        $isSubdomain = (count(explode('.', $domain)) > 2);
+
+        // Обработка www доменов - всегда удаляем www
         if ($isWwwDomain) {
             $domain = substr($domain, 4);
+            Logger::log("WWW domain detected, using without www: $domain");
+
+            // Удаляем www домен если существует у любого пользователя
+            $wwwOwner = self::findDomainOwner($originalDomain);
+            if ($wwwOwner) {
+                Logger::log("Removing existing www domain from user: $wwwOwner");
+                exec("/usr/local/hestia/bin/v-delete-web-domain $wwwOwner $originalDomain 'yes' 2>&1", $output, $returnVar);
+            }
         }
 
+        // Проверяем, есть ли домен у текущего пользователя
         exec("/usr/local/hestia/bin/v-list-web-domain $user $domain 2>/dev/null", $output, $returnVar);
         if ($returnVar === 0) {
             Logger::log("Domain already exists for user $user: $domain");
@@ -22,18 +34,56 @@ class DomainManager
         }
 
         Logger::log("Checking for domain ownership: $domain");
-
-        // Более точная проверка владельца домена
         $currentOwner = self::findDomainOwner($domain);
 
+        // Если домен существует у другого пользователя
         if ($currentOwner && $currentOwner !== $user) {
-            Logger::log("Domain exists with owner: $currentOwner, transferring to: $user");
-            $domain = self::forceTransferDomain($domain, $currentOwner, $user);
-            return $domain;
+            // Если пришел поддомен, а есть основной домен - создаем основной домен
+            if ($isSubdomain) {
+                Logger::log("Subdomain $domain exists with owner: $currentOwner");
+                Logger::log("Creating main domain instead, keeping existing subdomain");
+
+                // Извлекаем основной домен (domain.com из sub.domain.com)
+                $parts = explode('.', $domain);
+                $mainDomain = implode('.', array_slice($parts, -2));
+
+                Logger::log("Extracted main domain: $mainDomain");
+
+                // Проверяем, есть ли основной домен у текущего пользователя
+                exec("/usr/local/hestia/bin/v-list-web-domain $user $mainDomain 2>/dev/null", $output, $returnVar);
+                if ($returnVar === 0) {
+                    Logger::log("Main domain already exists for user $user: $mainDomain");
+                    return $mainDomain;
+                }
+
+                // Проверяем владельца основного домена
+                $mainOwner = self::findDomainOwner($mainDomain);
+                if ($mainOwner && $mainOwner !== $user) {
+                    Logger::log("Main domain exists with owner: $mainOwner, transferring to: $user");
+                    return self::forceTransferDomain($mainDomain, $mainOwner, $user);
+                }
+
+                // Создаем основной домен
+                $domain = $mainDomain;
+                Logger::log("Creating main domain: $domain");
+            } else {
+                // Если пришел основной домен, а есть поддомен - НЕ удаляем поддомен, создаем основной
+                Logger::log("Domain exists with owner: $currentOwner");
+
+                // Проверяем, является ли существующий домен поддоменом
+                $existingIsSubdomain = (count(explode('.', $domain)) > 2);
+                if ($existingIsSubdomain) {
+                    Logger::log("Existing domain is subdomain, keeping it and creating main domain");
+                } else {
+                    Logger::log("Transferring main domain from $currentOwner to: $user");
+                    return self::forceTransferDomain($domain, $currentOwner, $user);
+                }
+            }
         }
 
         Logger::log("Domain does not exist - creating new: $domain");
 
+        // Создание домена
         Logger::log("Adding domain to user $user: $domain");
         $output = [];
         exec("/usr/local/hestia/bin/v-add-web-domain $user $domain 2>&1", $output, $returnVar);
